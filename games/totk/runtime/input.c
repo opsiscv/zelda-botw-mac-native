@@ -238,6 +238,8 @@ static void *input_file(void *arg) {
         } else if (!strncmp(line, "panefind ", 9)) { float x = 0, y = 0, t = 1; sscanf(line + 9, "%f %f %f", &x, &y, &t); extern void botw_panefind(float, float, float); botw_panefind(x, y, t);
         } else if (!strncmp(line, "qfind ", 6)) { extern void botw_qfind(uint64_t); botw_qfind(strtoull(line + 6, NULL, 16));
         } else if (!strcmp(line, "probes\n")) { extern void botw_probes(void); botw_probes();
+        } else if (!strncmp(line, "poke8 ", 6)) { unsigned long long ad = 0; unsigned v = 0; sscanf(line + 6, "%llx %x", &ad, &v); extern void botw_poke8(uint64_t, unsigned); botw_poke8(ad, v);
+        } else if (!strcmp(line, "uifocus\n")) { extern void botw_uifocus(void); botw_uifocus();
         } else if (!strcmp(line, "uilist\n")) { extern void botw_uilist(void); botw_uilist();
         } else if (!strcmp(line, "invobj\n")) { extern void botw_invobj(void); botw_invobj();
         } else if (!strcmp(line, "slotsnow\n")) { extern int runtime_inventory_slots(void *, int, int *); float sl[64 * 3]; int sel = -1, n = runtime_inventory_slots(sl, 64, &sel);
