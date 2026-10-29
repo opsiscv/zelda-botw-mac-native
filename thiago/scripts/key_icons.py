@@ -6,7 +6,7 @@ the default keys (games/totk/runtime/input.c, frontend.m), moved by keys.txt (ru
 right and middle buttons from controls.txt. Run it again after changing either file, with the game closed, then the
 manifest (README). python3 key_icons.py [--preview out.png]
 """
-import sys
+import struct, sys
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import bntx_bc4
@@ -21,6 +21,9 @@ FONT = 'External_00.bffnt'
 DEFAULT = {'a': 'e', 'b': 'shift', 'x': 'space', 'y': 'u', 'l': 'q', 'r': 'ctrl', 'zl': 'caps', 'zr': None,
            'plus': 'esc', 'minus': 'tab', 'lstick': 'z', 'rstick': 'c', 'dpad_left': 'f', 'dpad_up': 'g',
            'dpad_right': 'b', 'dpad_down': 'v', 'move_up': 'w', 'move_left': 'a', 'move_down': 's', 'move_right': 'd'}
+# In a menu (the world stopped: dialogs, the pause menu; runtime/frontend.m) these buttons come from other keys: the
+# left click confirms (A), Esc goes back (B), E is the next tab (R), V sorts (Y).
+MENU = {'a': 'mouse_left', 'b': 'esc', 'r': 'e', 'y': 'v'}
 CONTROLS_NAMES = {'left': 'dpad_left', 'up': 'dpad_up', 'right': 'dpad_right', 'down': 'dpad_down'}
 MOUSE = ('mouse_left', 'mouse_right', 'mouse_middle')   # the side buttons only repeat keys: not shown
 
@@ -33,18 +36,19 @@ def lines(text):
             yield a, b
 
 
-def labels(keys_txt, controls_txt):
+def labels(keys_txt, controls_txt, menu=False):
     """Switch button -> the key or mouse button shown for it (None: nothing does it; the Switch icon stays)."""
     moved = dict(lines(keys_txt))
     out = {}
-    for button, key in DEFAULT.items():
+    for button, key in {**DEFAULT, **MENU}.items() if menu else DEFAULT.items():
+        if key in MOUSE: out[button] = key; continue
         found = [p for p, t in moved.items() if t == key]
         out[button] = ([key] if key and key not in moved else []) + found
         out[button] = out[button][0] if out[button] else None
     for physical, value in lines(controls_txt):
         if physical in MOUSE and value.split():
-            target = value.split()[0]
-            out[CONTROLS_NAMES.get(target, target)] = physical
+            target = CONTROLS_NAMES.get(value.split()[0], value.split()[0])
+            if not (menu and target in MENU): out[target] = physical
     return out
 
 
@@ -166,7 +170,7 @@ def redraw(img, draws):
 
 
 def widths(fnt, wide):
-    """CWDH (left, glyph width, advance) of the wide glyphs: the whole cell."""
+    """CWDH (left, glyph width, advance) of the wide glyphs: the whole cell (the same in the world's and the menu's)."""
     fnt = bytearray(fnt); c = fnt.index(b'CWDH'); first = int.from_bytes(fnt[c + 8:c + 10], 'little')
     for i in wide:
         e = c + 16 + (i - first) * 3
@@ -183,25 +187,44 @@ def preview(img, path):
     out.resize((out.width * 2, out.height * 2), Image.LANCZOS).save(path)
 
 
+def swapped_sheet(fnt):
+    """The font's sheet as stored (swizzled BC4): what the runtime looks for in the game's memory and replaces."""
+    off, size, *_ = bntx_bc4.sheet(fnt)
+    return fnt[off:off + size]
+
+
 def main():
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]/'games/totk/scripts'))
     import make_mod_manifest as m
     read = lambda p: p.read_text() if p.exists() else ''
-    k = labels(read(DATA/'keys.txt'), read(DATA/'controls.txt'))
-    print('icons:', {b: v for b, v in k.items()})
-    draws = glyphs(k)
+    keys, controls = read(DATA/'keys.txt'), read(DATA/'controls.txt')
+    world, menu = glyphs(labels(keys, controls)), glyphs(labels(keys, controls, menu=True))
+    print('icons:', labels(keys, controls)); print('in menus:', labels(keys, controls, menu=True))
+    wide = sorted({i for d in (world, menu) for i, f in d.items() if getattr(f, 'wide', False)})
+    for d in (world, menu):   # a glyph is as wide in both (its width is in the font data, not the sheet)
+        for i in wide:
+            if i in d: d[i].wide = True
     idx = m.read_index(ROMFS/'runtime-index.bin'); rom = open(ROMFS/'romfs.bin', 'rb')
-    shown = None
+    shown, pairs = None, []
     for path in sorted(p for p in idx if p.startswith('Font/Font_') and p.endswith('.sbfarc')):
         o, s = idx[path]; rom.seek(o); arc = bytearray(yaz0_decode(rom.read(s)))
         files = {n: (a, e) for n, a, e in sarc_files(arc)}
         if FONT not in files: continue
-        a, e = files[FONT]; fnt = bytes(arc[a:e])
-        img = bntx_bc4.decode(fnt); redraw(img, draws)
-        arc[a:e] = widths(bntx_bc4.encode(fnt, img), [i for i, f in draws.items() if getattr(f, 'wide', False)])   # the same size: the archive's layout holds
-        dst = OUT/path; dst.parent.mkdir(parents=True, exist_ok=True); dst.write_bytes(yaz0_encode(bytes(arc)))
-        print(path); shown = shown or img
-    if '--preview' in sys.argv and shown: preview(shown, sys.argv[sys.argv.index('--preview') + 1])
+        a, e = files[FONT]; fnt = widths(bytes(arc[a:e]), wide)
+        img = bntx_bc4.decode(fnt); redraw(img, world); out = bntx_bc4.encode(fnt, img)
+        img2 = bntx_bc4.decode(fnt); redraw(img2, menu); pair = (swapped_sheet(out), swapped_sheet(bntx_bc4.encode(fnt, img2)))
+        if pair not in pairs: pairs.append(pair)
+        arc[a:e] = out   # the same size: the archive's layout holds
+        dst = OUT/path; data = yaz0_encode(bytes(arc))
+        if dst.exists() and dst.read_bytes() == data: print(path, 'unchanged')   # left alone: a running game checks its mod files
+        else: dst.parent.mkdir(parents=True, exist_ok=True); dst.write_bytes(data); print(path, 'written (run the manifest again)'); shown = shown or (img, img2)
+    # key_icons.bin (runtime/game_patches_botw.c): the menu sheet swapped in while the world is stopped.
+    size = len(pairs[0][0])
+    (DATA/'key_icons.bin').write_bytes(b'KICO' + struct.pack('<II', len(pairs), size) + b''.join(w + m for w, m in pairs))
+    print(DATA/'key_icons.bin', len(pairs), 'sheets')
+    if '--preview' in sys.argv and shown:
+        p = sys.argv[sys.argv.index('--preview') + 1]
+        preview(shown[0], p); preview(shown[1], p.replace('.png', '-menu.png'))
 
 
 if __name__ == '__main__':

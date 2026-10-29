@@ -63,8 +63,9 @@ python3 games/totk/scripts/make_mod_manifest.py "$HOME/Library/Application Suppo
   --app "/Applications/Breath of the Wild.app" --version botw160
 ```
 
-Cada botão do Switch tem um ícone só: ele mostra a tecla do mundo (o A mostra E, mesmo nos menus, onde Enter e Espaço
-confirmam). Testes: `python3 -m unittest test_key_icons` em `thiago/scripts`.
+Os ícones trocam sozinhos entre o mundo e os menus: o script grava também `key_icons.bin` (as duas versões da imagem),
+e o app copia a do menu por cima quando o mundo para (no menu: clique esquerdo seleciona, Esc volta, E vai para a próxima
+aba, V ordena). Testes: `python3 -m unittest test_key_icons` em `thiago/scripts`.
 
 ## Armas inquebráveis
 

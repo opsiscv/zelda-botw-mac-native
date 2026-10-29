@@ -23,6 +23,16 @@ class Labels(unittest.TestCase):
         self.assertIsNone(key_icons.labels('tab = none\n', '')['minus'])
 
 
+class MenuLabels(unittest.TestCase):
+    def test_menu(self):
+        k = key_icons.labels('', 'mouse_left = y\nmouse_middle = r\nmouse_right = zr aim mouse_left\n', menu=True)
+        self.assertEqual((k['a'], k['b'], k['r'], k['y'], k['l'], k['zr']), ('mouse_left', 'esc', 'e', 'v', 'q', 'mouse_right'))
+
+    def test_menu_follows_keys_txt(self):
+        k = key_icons.labels('f = e\ne = none\nn = v\nv = none\n', '', menu=True)
+        self.assertEqual((k['r'], k['y']), ('f', 'n'))
+
+
 class Sheet(unittest.TestCase):
     def test_bc4_block_round_trip(self):
         px = [0, 255] * 8

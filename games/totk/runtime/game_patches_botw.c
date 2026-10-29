@@ -24,6 +24,7 @@ static void probes_arm(Module *m);   /* TOTK_PROBE, before botw_jq_hook */
 enum { HORSE_CAM_RET = 0xd7f850 };   /* CameraHorse's update returns here (ret, after add sp, sp, #0xe0) */
 enum { HORSE_AI_SITE = 0x2a3960, HORSE_AI_WORD = 0xf9400660 };   /* HorseRiddenByPlayer's per-frame step (main+0x2a3900), at its ldr x0, [x19, #8] after the rider is fetched */
 static uint8_t *g_horse_ai_main;
+static void key_icons_start(void);
 static uint8_t *g_horse_ret_main;
 enum { INV_PAGE_SITE = 0x11b66f8, INV_PAGE_WORD = 0xb9761c08, INV_PAGE_TURN = 0x11c1090, INV_PAGE_BACK = 0x11b6fcc };   /* the inventory pages, before botw_jq_hook */
 static uint8_t *g_inv_main; static _Atomic int g_inv_pages;
@@ -640,6 +641,7 @@ void runtime_game_patches(Module *m) {
       extern int runtime_setting_word(const char *, char *, size_t); char w[32];
       if (runtime_setting_word("pitch-hold.txt", w, sizeof w)) g_tilt_hold_s = fmax(0, atof(w));
       fprintf(stderr, "[botw] mouse camera: a mouse tilt holds %g s before the game levels the view\n", g_tilt_hold_s); }
+    if (!ios_code()) key_icons_start();   /* the button icons follow the world and the menus (end of file) */
     { uint32_t w; memcpy(&w, m->base + HORSE_AI_SITE, 4);
       if (w == HORSE_AI_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d6u << 5); memcpy(m->base + HORSE_AI_SITE, &b, 4); g_horse_ai_main = m->base; }
       fprintf(stderr, "[botw] horse ridden step: %s\n", g_horse_ai_main ? "hooked" : "not hooked"); }
@@ -2031,4 +2033,63 @@ void botw_qfind(uint64_t value) {
         }
     }
     fprintf(stderr, "[qfind] done %d\n", hits);
+}
+
+/* The button icons follow where the game is (key_icons_swap.h): every 100 ms, when the world stops or goes on, the icon
+   sheets found in the game's memory get the menu's or the world's keys. Found once (and again when they are gone):
+   readable and writable regions, at 512-byte steps (texture data is at least that aligned), read with vm_read. */
+#include "key_icons_swap.h"
+static int key_icons_scan(const KeyIcons *k, uint64_t *found, int max) {
+    static uint8_t chunk[1 << 20]; int n = 0; mach_vm_address_t a = 0;
+    uint8_t *sheet = malloc(k->size); if (!sheet) return 0;
+    for (;;) {
+        mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t c = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+        if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &c, &obj) != KERN_SUCCESS) break;
+        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size < (16ull << 30))
+            for (uint64_t at = a; at < a + size && n < max; at += sizeof chunk) {
+                size_t len = (size_t)fmin((double)sizeof chunk, (double)(a + size - at));
+                if (!camdump_read(at, chunk, len)) continue;
+                for (size_t o = 0; o + 64 <= len && n < max; o += 512) {
+                    uint64_t s = at + o;
+                    if (s >= (uint64_t)(uintptr_t)k->data && s < (uint64_t)(uintptr_t)k->data + (uint64_t)k->count * 2 * k->size) continue;   /* our own copy */
+                    for (unsigned p = 0; p < k->count; p++)
+                        if (!memcmp(chunk + o, key_icons_sheet(k, p, 0), 64) && camdump_read(s, sheet, k->size) && key_icons_which(k, p, sheet) >= 0) { found[n++] = s << 3 | p; break; }
+                }
+            }
+        a += size;
+    }
+    free(sheet); return n;
+}
+static void *key_icons_run(void *arg) {
+    const KeyIcons *k = arg; uint64_t found[16]; int n = 0, cur = 0; uint64_t last_scan = 0;
+    uint8_t *sheet = malloc(k->size); if (!sheet) return NULL;
+    for (;;) {
+        usleep(100000);
+        int want = !runtime_game_world_live(); uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        if (!n && now - last_scan > 5000000000ull) {
+            last_scan = now; n = key_icons_scan(k, found, 16);
+            fprintf(stderr, "[botw] key icons: %d icon sheets found in memory\n", n); cur = -1;
+        }
+        if (!n || want == cur) continue;
+        int kept = 0;
+        for (int i = 0; i < n; i++) {
+            uint64_t s = found[i] >> 3; unsigned p = found[i] & 7;
+            if (!camdump_read(s, sheet, k->size) || key_icons_which(k, p, sheet) < 0) continue;   /* gone: dropped */
+            if (key_icons_which(k, p, sheet) != want) memcpy((void *)(uintptr_t)s, key_icons_sheet(k, p, want), k->size);
+            found[kept++] = found[i];
+        }
+        n = kept; cur = want;
+        fprintf(stderr, "[botw] key icons: %s keys (%d sheets)\n", want ? "menu" : "world", n);
+    }
+}
+static void key_icons_start(void) {
+    const char *c = getenv("TOTK_CONTROLS"), *slash = c ? strrchr(c, '/') : NULL; if (!slash) return;
+    char path[4096]; snprintf(path, sizeof path, "%.*s/key_icons.bin", (int)(slash - c), c);
+    FILE *f = fopen(path, "rb"); if (!f) return;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *data = n > 0 ? malloc((size_t)n) : NULL; static KeyIcons k;
+    if (!data || fread(data, 1, (size_t)n, f) != (size_t)n || key_icons_load(&k, data, (size_t)n)) { fprintf(stderr, "[botw] key icons: %s unreadable\n", path); fclose(f); free(data); return; }
+    fclose(f);
+    pthread_t t; pthread_create(&t, NULL, key_icons_run, &k); pthread_detach(t);
+    fprintf(stderr, "[botw] key icons: %s, %u sheet pairs\n", path, k.count);
 }
