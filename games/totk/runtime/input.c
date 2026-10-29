@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include "horse_coast.h"
 typedef struct{int64_t sampling;uint64_t buttons;int32_t lx,ly,rx,ry;uint32_t attributes,pad;} NpadState;
 _Static_assert(sizeof(NpadState)==40,"Npad full-key ABI");
 static pthread_mutex_t inputLock=PTHREAD_MUTEX_INITIALIZER;
@@ -67,12 +68,12 @@ static void horse_recentre(NpadState *state){
  unsigned now=keys[13]|keys[1]<<1|keys[0]<<2|keys[2]<<3;uint64_t t=runtime_now_ns();
  if(now!=last){last=now;until=now&&runtime_horse_state&&runtime_mouse_enabled()&&runtime_horse_state(&yaw,&speed)?t+HORSE_RECENTRE_NS:0;}
  if(t<until)state->lx=state->ly=0;}
-/* Riding with the keyboard (mouse mode): with no key held the horse is reined in while it goes forward (the game keeps
-   its gait); not below that speed: held back at a stand it would back up or turn round. */
+/* Riding with the keyboard (mouse mode): with no key held the horse is reined in, in pulls (horse_coast.h), while it
+   goes forward (the game keeps its gait); not below that speed: held back at a stand it would back up or turn round. */
 #define HORSE_STOP_SPEED 0.8f   /* units per second forward, smoothed */
-static void horse_brake(NpadState *state){
+static void horse_brake(NpadState *state,uint64_t since_release){
  extern int runtime_horse_state(float *,float *) __attribute__((weak));float yaw,speed;
- if(!state->lx&&!state->ly&&runtime_horse_state&&runtime_mouse_enabled()&&runtime_horse_state(&yaw,&speed)&&speed>HORSE_STOP_SPEED)state->ly=-32767;}
+ if(!state->lx&&!state->ly&&horse_coast_rein(since_release)&&runtime_horse_state&&runtime_mouse_enabled()&&runtime_horse_state(&yaw,&speed)&&speed>HORSE_STOP_SPEED)state->ly=-32767;}
 int runtime_horse_keys(void){return keys[13]|keys[1]<<1|keys[0]<<2|keys[2]<<3;}   /* W S A D, for the horse's own step (game_patches_botw.c) */
 static int forcedStick;static int32_t forcedLx,forcedLy;   /* diagnostic "stick <lx> <ly>" / "stick off": the left stick as given */
 static int pad_states(NpadState *out,int max,const uint32_t *id,uint32_t want_style){if(max<=0)return 0;if(id)input_log(want_style==2?"handheld state":"full-key state",*id);if(!out||!id)runtime_fail("controller output pointer");pthread_mutex_lock(&inputLock);NpadState state={.sampling=++sample};if(enabled&&allowed&&*id==pad_id()&&want_style==pad_style()&&(styles&want_style)){
@@ -82,7 +83,7 @@ static int pad_states(NpadState *out,int max,const uint32_t *id,uint32_t want_st
  if(pad.buttons&~padSeen||abs(pad.lx)>16384||abs(pad.ly)>16384||abs(pad.rx)>16384||abs(pad.ry)>16384)user_input("controller");padSeen=pad.buttons;
  if(abs(pad.lx)>abs(state.lx))state.lx=pad.lx;if(abs(pad.ly)>abs(state.ly))state.ly=pad.ly;
  if(abs(pad.rx)>abs(state.rx))state.rx=pad.rx;if(abs(pad.ry)>abs(state.ry))state.ry=pad.ry;
- if(forcedStick){state.lx=forcedLx;state.ly=forcedLy;}else{horse_recentre(&state);if(!(keys[13]|keys[1]|keys[0]|keys[2]))horse_brake(&state);}
+ if(forcedStick){state.lx=forcedLx;state.ly=forcedLy;}else{horse_recentre(&state);static uint64_t released;uint64_t t=runtime_now_ns();if(keys[13]|keys[1]|keys[0]|keys[2])released=t;else horse_brake(&state,t-released);}
  }*out=state;pthread_mutex_unlock(&inputLock);return 1;}
 static int disconnected_states(NpadState *out,int max,const uint32_t *id){if(id)input_log("joy-con state",*id);if(max<=0)return 0;if(!out)runtime_fail("controller output pointer");pthread_mutex_lock(&inputLock);*out=(NpadState){.sampling=++sample};pthread_mutex_unlock(&inputLock);return 1;}
 static void hold_type(int type){if(type<0||type>1)runtime_fail("invalid joy hold type");holdType=type;(void)holdType;}

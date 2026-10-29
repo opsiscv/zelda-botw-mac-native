@@ -225,6 +225,12 @@ probe-present-hold:
 	@mkdir -p build/tests
 	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror -Ithird_party/d2r_gfx/gfx/nvn tests/present_hold/probe.c -o build/tests/present_hold_probe
 	build/tests/present_hold_probe
+.PHONY: probe-horse-coast
+probe-horse-coast:
+	@mkdir -p build/tests
+	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror -Iruntime tests/horse_coast/probe.c -o build/tests/horse_coast_probe
+	build/tests/horse_coast_probe
+
 .PHONY: probe-space-skip
 probe-space-skip:
 	@mkdir -p build/tests

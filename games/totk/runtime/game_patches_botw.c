@@ -3,6 +3,7 @@
    until BotW's own sites are found. */
 #include <stdatomic.h>
 #include "world_survey.h"
+#include "horse_coast.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -940,15 +941,14 @@ void botw_watch(uint64_t addr, double secs, int store) {
 /* Riding in mouse mode: HorseRiddenByPlayer's per-frame step (main+0x2a3900, zeldaret/botw actionHorseRiddenByPlayer)
    copies the rider's input from the rider (at its stack + 0x10, fetched just before this site): +0x264 side * |side|,
    +0x268 forward, +0x26c side, all relative to the horse. They are written here from W / A / D, so the horse goes where
-   it faces whatever the camera does: W forward, A / D turn, together a curve; S is the stick's back (rein in). Its static
+   it faces whatever the camera does: W forward, A / D turn, together a curve (horse_coast.h horse_steer); S is the stick's back (rein in). Its static
    params (pointers in the action) are set too: it never follows the road by itself (FamiliarityThresholdOfRailTrace) and
    never changes the steering or gear against the rider (Resist...Probability). */
 static int horse_ai_hook(ucontext_t *u) {
     uint64_t *x = u->uc_mcontext->__ss.__x, sp = u->uc_mcontext->__ss.__sp, rider = 0;
     extern int runtime_horse_keys(void);
     if (runtime_mouse_enabled() && camdump_read(sp + 0x10, &rider, 8) && rider) {
-        int k = runtime_horse_keys(); float fwd = (k & 1) ? 1 : 0, side = (k & 8) ? 1 : (k & 4) ? -1 : 0;
-        if (fwd && side) { fwd = 0.70710678f; side *= 0.70710678f; }
+        float fwd, side; horse_steer(runtime_horse_keys(), &fwd, &side);
         float *r = (float *)(uintptr_t)(rider + 0x264); r[0] = side * fabsf(side); r[1] = fwd; r[2] = side;
         static const struct { uint16_t off; float value; } params[] = {
             { 0xb8, 1e9f },   /* FamiliarityThresholdOfRailTrace */
