@@ -18,7 +18,6 @@
 #include "switch_left_fallback.h"
 #include "mouse_look.h"       // mouse mode: movement as the right stick and the gyro
 #include "mouse_cam.h"        // mouse mode in Breath of the Wild: the mouse sets where the camera looks
-#include "menu_pointer.h"     // ... and walks the menus (menu_steps)
 
 static pthread_mutex_t gamepadLock = PTHREAD_MUTEX_INITIALIZER;
 static RuntimeGamepadState gamepadState;
@@ -349,35 +348,22 @@ static MouseLookSettings mouseSettings;        /* gamepadLock */
 static int32_t mouseRX, mouseRY;               /* gamepadLock; the stick shown by the last tick */
 static MouseCam mouseCam;                      /* gamepadLock */
 #define MOUSE_CAM_RAD_PER_POINT 0.0015   /* at sensitivity 50: 1000 points of mouse movement turn about 86 degrees */
-/* Menus (Breath of the Wild: no camera action updating, not the title, ZL not held): the mouse walks the selection
-   with the d-pad (menu_pointer.h), the left button is A and the right B. The step key is held two ticks and let go two. */
-extern int runtime_game_world_live(void) __attribute__((weak));
-extern int runtime_title_cursor(void) __attribute__((weak));
+/* The menus take the pointer itself (frontend.m title_tick: the window lets it go wherever the world stops). Held here:
+   the quick-select bar's wheel (right-stick flicks) and a rune's left click (A). The key is held two ticks, let go two. */
 extern int runtime_rune_aim_live(void) __attribute__((weak));
 void runtime_input_key_synthetic(unsigned code, int down);
 extern int runtime_mouse_camera_take_hooked __attribute__((weak));   /* game_patches_botw.c: the camera updates are hooked */
-static MenuSteps menuSteps;                    /* gamepadLock */
 static unsigned menuKey; static int menuKeyTicks; /* mouse timer */
 static _Atomic int wheelSteps;                 /* quick-select bar: wheel notches to walk (+ right), as right-stick flicks */
-static int mouse_in_menu(void) {
-    if (!runtime_game_world_live || runtime_game_world_live()) return 0;
-    if (runtime_title_cursor && runtime_title_cursor() >= 0) return 0;
-    extern int runtime_input_zl_held(void);
-    return !runtime_input_zl_held();
-}
 static int mouseGyro;                          /* the mouse feeds the gyro in this mouse mode */
 static dispatch_source_t mouseTimer;
 static int mouseTicksByHand;                   /* tests/mouse/probe.m drives mouse_tick itself */
 static void (*mouseHook)(void);                /* the window: mouse mode changed */
 
-static void menu_tick(void) {   /* mouse timer: one d-pad step at a time (V down, G up, F left, B right) */
+static void menu_tick(void) {   /* mouse timer: the quick-select bar's wheel, a notch at a time */
     if (menuKey) { if (++menuKeyTicks == 2) runtime_input_key_synthetic(menuKey, 0); if (menuKeyTicks >= 4) menuKey = 0; return; }
     int w = atomic_load(&wheelSteps);
-    if (w) { atomic_fetch_add(&wheelSteps, w > 0 ? -1 : 1); menuKey = w > 0 ? 124 : 123; menuKeyTicks = 0; runtime_input_key_synthetic(menuKey, 1); return; }   /* arrow keys: the right stick */
-    int step;
-    pthread_mutex_lock(&gamepadLock); step = menu_steps_next(&menuSteps); pthread_mutex_unlock(&gamepadLock);
-    static const unsigned keys[5] = { 0, 5, 9, 3, 11 };
-    if (step) { menuKey = keys[step]; menuKeyTicks = 0; runtime_input_key_synthetic(menuKey, 1); }
+    if (w) { atomic_fetch_add(&wheelSteps, w > 0 ? -1 : 1); menuKey = w > 0 ? 124 : 123; menuKeyTicks = 0; runtime_input_key_synthetic(menuKey, 1); }   /* arrow keys: the right stick */
 }
 static void mouse_tick(void) {
     double gyro[3], acc[3]; int32_t rx, ry;
@@ -451,10 +437,7 @@ void runtime_mouse_move(double dx, double dy) {   /* the window, while it holds 
     if (!atomic_load(&mouseMode)) return;
     extern int runtime_input_dpad_held(void);
     if (runtime_input_dpad_held()) return;   /* a quick-select bar open (weapons, shields, bows, runes): the camera stays */
-    int menu = mouse_in_menu();
     pthread_mutex_lock(&gamepadLock);
-    if (menu) { menu_steps_move(&menuSteps, dx, dy); pthread_mutex_unlock(&gamepadLock); return; }
-    menu_steps_reset(&menuSteps);
     mouse_look_move(&mouseLook, dx, dy, &mouseSettings);
     const double k = mouseSettings.sensitivity / 50.0 * MOUSE_CAM_RAD_PER_POINT;
     mouse_cam_add(&mouseCam, runtime_now_ns() * 1e-9, dx * k, dy * (mouseSettings.invert_y ? -k : k));
@@ -472,10 +455,10 @@ int runtime_mouse_camera_take(double *right, double *down) {
 
 void runtime_mouse_button(int button, int down) {   /* main thread */
     if (button < 0 || button >= CONTROLLER_MOUSE_BUTTONS || (down && !atomic_load(&mouseMode))) return;
-    static unsigned menuButton[2];   /* a menu press is let go as it was pressed, even if the menu closed meanwhile */
+    static unsigned menuButton[2];   /* a rune's press is let go as it was pressed, even if the rune was put away meanwhile */
     /* a rune out (its aiming camera, game_patches_botw.c), the bow not drawn: the left button uses it (A, user 2026-10-29) */
     int rune = button == 0 && down && runtime_rune_aim_live && runtime_rune_aim_live() && !(mouseButtons & 2);
-    if (button < 2 && (down ? mouse_in_menu() || rune : menuButton[button] != 0)) {
+    if (button < 2 && (down ? rune : menuButton[button] != 0)) {
         if (down) menuButton[button] = button ? 56 : 38;   /* right: Shift (B), left: J (A) */
         runtime_input_key_synthetic(menuButton[button], down);
         if (!down) menuButton[button] = 0;
@@ -493,10 +476,7 @@ void runtime_mouse_wheel(int steps) {   /* main thread: wheel notches (down = +1
     if (runtime_input_dpad_held()) {   /* a quick-select bar: the wheel walks it left and right (down = right) */
         int w = atomic_load(&wheelSteps) + steps;
         atomic_store(&wheelSteps, w > 3 ? 3 : w < -3 ? -3 : w);   /* a few at most: none left over after the wheel stops */
-        return;
     }
-    if (!mouse_in_menu()) return;   /* a menu: up and down */
-    pthread_mutex_lock(&gamepadLock); menu_steps_move(&menuSteps, 0, steps * MENU_STEP_POINTS); pthread_mutex_unlock(&gamepadLock);
 }
 
 void runtime_mouse_release(void) {   /* main thread: the window let the pointer go (focus lost, text entry, mouse mode off) */

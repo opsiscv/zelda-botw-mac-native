@@ -46,18 +46,7 @@ static inline int menu_pointer_mode(int on, int title_cursor, int frame, int wor
     return world ? MENU_POINTER_HELD : MENU_POINTER_FREE;
 }
 
-/* Other menus (no pointer of their own): the mouse movement walks the selection like the d-pad, a step per
-   MENU_STEP_POINTS of movement along the bigger axis (mouse down = down); a step clears the other axis. */
-enum { MENU_UP = 1, MENU_DOWN, MENU_LEFT, MENU_RIGHT };
-#define MENU_STEP_POINTS 40.0
-typedef struct { double x, y; } MenuSteps;
-static inline void menu_steps_reset(MenuSteps *m) { m->x = m->y = 0; }
-static inline void menu_steps_move(MenuSteps *m, double dx, double dy) { m->x += dx; m->y += dy; }
-static inline int menu_steps_next(MenuSteps *m) {
-    if (fabs(m->y) >= fabs(m->x) && fabs(m->y) >= MENU_STEP_POINTS) { int s = m->y > 0 ? MENU_DOWN : MENU_UP; m->y -= copysign(MENU_STEP_POINTS, m->y); m->x = 0; return s; }
-    if (fabs(m->x) >= MENU_STEP_POINTS) { int s = m->x > 0 ? MENU_RIGHT : MENU_LEFT; m->x -= copysign(MENU_STEP_POINTS, m->x); m->y = 0; return s; }
-    return 0;
-}
+enum { MENU_UP = 1, MENU_DOWN, MENU_LEFT, MENU_RIGHT };   /* d-pad steps */
 
 /* Menus with the selection frame (the same cursor layout as the title: the load list, Start / Cancel): its corners
    N_LT_00 and N_RD_00 give the selected item's box in layout units (centre 0,0, y up, 1280x720 shown aspect-fit).
@@ -65,23 +54,8 @@ static inline int menu_steps_next(MenuSteps *m) {
 static inline int menu_frame_valid(float left, float top, float right, float bottom) {
     return right - left > 60 && top - bottom > 20 && fabsf(left) < 640 && fabsf(right) < 640 && fabsf(top) < 360 && fabsf(bottom) < 360;
 }
-/* A small frame is a grid cell (the inventory), where left and right walk the grid; a wide one a list row (saves,
-   options), where left and right change the row's value and so are never stepped. */
+/* A small frame is a grid cell (the inventory, with page turns beside it), a wide one a list row. */
 static inline int menu_frame_small(const float r[4]) { return r[2] - r[0] < 200; }
-/* The step (MENU_UP / DOWN / LEFT / RIGHT, 0 for none) that brings the frame r = {left, top, right, bottom} toward the
-   point (view pixels, y up), and whether the point is in the frame: up and down first; a list row only up and down and
-   only over its column; a grid cell left and right too, on its row. MENU_FRAME_MARGIN keeps a frame from stepping back
-   and forth on its edge. */
-#define MENU_FRAME_MARGIN 6.0
-static inline int menu_frame_step(double w, double h, double x, double y, const float r[4], int *inside) {
-    double s = fmin(w / 1280, h / 720), lx = (x - (w - 1280 * s) / 2) / s - 640, ly = (y - (h - 720 * s) / 2) / s - 360;
-    *inside = lx >= r[0] && lx <= r[2] && ly <= r[1] && ly >= r[3];
-    if (!menu_frame_small(r) && (lx < r[0] - 40 || lx > r[2] + 40)) return 0;
-    if (ly > r[1] + MENU_FRAME_MARGIN) return MENU_UP;
-    if (ly < r[3] - MENU_FRAME_MARGIN) return MENU_DOWN;
-    if (!menu_frame_small(r)) return 0;
-    return lx < r[0] - MENU_FRAME_MARGIN ? MENU_LEFT : lx > r[2] + MENU_FRAME_MARGIN ? MENU_RIGHT : 0;
-}
 /* The frame stays in memory, where it was, after its menu closes, faded out: its pane's alpha (+0x5a) is 0xff while
    its menu shows it and drops (0x0a) once the menu closes. */
 static inline int menu_frame_shown(uint8_t alpha) { return alpha >= 0x80; }

@@ -873,7 +873,7 @@ static int horse_ret_hook(ucontext_t *u) {
 #include <mach/mach.h>
 static uint64_t g_watch_addr; static int g_watch_store;
 enum { WATCH_SLOTS = 512 };
-static struct { _Atomic uint64_t pc, lr; _Atomic uint32_t n; } g_watch_hits[WATCH_SLOTS];
+static struct { _Atomic uint64_t pc, lr; _Atomic uint32_t n; uint64_t chain[8]; } g_watch_hits[WATCH_SLOTS];   /* chain: return addresses up the frame pointers */
 static void watch_set(thread_act_t t, int on) {
     arm_debug_state64_t d; mach_msg_type_number_t c = ARM_DEBUG_STATE64_COUNT;
     if (thread_get_state(t, ARM_DEBUG_STATE64, (thread_state_t)&d, &c) != KERN_SUCCESS) return;
@@ -903,7 +903,10 @@ static int watch_trap(ucontext_t *u) {
         u->uc_mcontext->__ss.__pc += 4; return 1;
     }
     for (unsigned i = (unsigned)(pc >> 2) % WATCH_SLOTS, k = 0; k < WATCH_SLOTS; k++, i = (i + 1) % WATCH_SLOTS) {
-        uint64_t z = 0; if (atomic_compare_exchange_strong(&g_watch_hits[i].pc, &z, pc) || z == pc) { atomic_store(&g_watch_hits[i].lr, lr); atomic_fetch_add(&g_watch_hits[i].n, 1); break; }
+        uint64_t z = 0; if (atomic_compare_exchange_strong(&g_watch_hits[i].pc, &z, pc) || z == pc) { atomic_store(&g_watch_hits[i].lr, lr);
+            if (!atomic_fetch_add(&g_watch_hits[i].n, 1)) { uint64_t fp = u->uc_mcontext->__ss.__fp, fr[2];
+                for (int k = 0; k < 8 && fp && camdump_read(fp, fr, 16); k++) { g_watch_hits[i].chain[k] = fr[1]; fp = fr[0]; } }
+            break; }
     }
     thread_act_t self = mach_thread_self(); watch_set(self, 0); mach_port_deallocate(mach_task_self(), self);
     return 1;
@@ -914,6 +917,7 @@ static void *watch_run(void *arg) {
     watch_all(0); uint64_t base = (uintptr_t)g_uw_main;
     for (unsigned i = 0; i < WATCH_SLOTS; i++) { uint64_t pc = atomic_load(&g_watch_hits[i].pc); if (!pc) continue;
         fprintf(stderr, "[watch] main%+lld x%u lr main%+lld\n", (long long)(pc - base), atomic_load(&g_watch_hits[i].n), (long long)(atomic_load(&g_watch_hits[i].lr) - base));
+        for (int k = 0; k < 8 && g_watch_hits[i].chain[k]; k++) { fprintf(stderr, "[watch]   caller main+%#llx\n", (unsigned long long)(g_watch_hits[i].chain[k] - base)); g_watch_hits[i].chain[k] = 0; }
         atomic_store(&g_watch_hits[i].pc, 0); atomic_store(&g_watch_hits[i].n, 0); }
     fprintf(stderr, "[watch] done\n"); g_watch_addr = 0; return NULL;
 }
@@ -2127,12 +2131,8 @@ void botw_uilist(void) {
           if (k) fprintf(stderr, "[uilist] group %d flag %d: %d elements, first %s at %g %g\n", g, ff[g], k, nm, xy[0], xy[1]); } }
     { MenuHit h[64]; int sel = -1, n = runtime_ui_hits(h, 64, &sel);
       for (int i = 0; i < n; i++) {
-          fprintf(stderr, "[uilist] hit %d %g %g %gx%g%s\n", i, h[i].x, h[i].y, h[i].w, h[i].h, i == sel ? " (selected)" : "");
-          uint64_t ctl = 0, pane = 0; static uint8_t b[0x900];
-          if (i < 12 && camdump_read(h[i].id + 0x18, &ctl, 8) && camdump_read(ctl + 0x60, &pane, 8) && camdump_read(pane, b, sizeof b))
-              for (size_t o = 0; o + 0xc8 <= sizeof b; o += 8) { const char *nm = (const char *)b + o + 0xb8;
-                  if ((nm[0] == 'N' || nm[0] == 'B' || nm[0] == 'P') && nm[1] == '_' ) { float px, py; memcpy(&px, b + o + 0x7c, 4); memcpy(&py, b + o + 0x8c, 4);
-                      fprintf(stderr, "[uilist]      +%03zx %.12s %g %g flags %02x\n", o, nm, px, py, b[o + 0x58]); } }
+          uint64_t ctl = 0; camdump_read(h[i].id + 0x18, &ctl, 8);
+          fprintf(stderr, "[uilist] hit %d %g %g %gx%g element %#llx control %#llx%s\n", i, h[i].x, h[i].y, h[i].w, h[i].h, (unsigned long long)h[i].id, (unsigned long long)ctl, i == sel ? " (selected)" : "");
       } }
     if (!camdump_read(obj + 0x48, &sel, 8) || !sel) return;
     int n = 0;
@@ -2243,8 +2243,6 @@ enum { UI_UPDATE_WORD = 0xf9402660,   /* ldr x0, [x19, #0x48] at UI_UPDATE_SITE 
        UI_LETGO_WORD = 0xb40001d4,    /* cbz x20, main+0x134e530 at UI_LETGO_SITE, after the old element's 0x138 */
        UI_DESELECT = 0x134e4e8, UI_NOTHING = 0x134e610 };
 static _Atomic uint64_t g_unfocus_obj; static int g_letgo;   /* g_letgo: the update's thread, between the two sites */
-static uint64_t g_let_go;   /* the element let go: put back as the selected one for a moment when one is asked for again */
-int runtime_ui_nav_hooked(void) { return g_nav_main != NULL; }
 void runtime_ui_select(uint64_t element) {
     uint64_t obj = cursor_object(); if (!obj) return;
     atomic_store(&g_unfocus_obj, 0); *(volatile uint64_t *)(uintptr_t)(obj + 0x50) = element;
@@ -2267,16 +2265,11 @@ static int ui_nav_hook(ucontext_t *u) {
     }
     if (x[19] == atomic_load(&g_unfocus_obj)) {
         if (sel) {   /* let it go the game's way, then nothing selected */
-            *(volatile uint64_t *)(uintptr_t)(x[19] + 0x48) = 0; x[21] = sel; g_letgo = 1; g_let_go = sel;
+            *(volatile uint64_t *)(uintptr_t)(x[19] + 0x48) = 0; x[21] = sel; g_letgo = 1;
             u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + UI_DESELECT; return 1;
         }
         u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + UI_NOTHING; return 1;
     }
-    uint64_t asked = 0;
-    if (!sel && g_let_go && camdump_read(x[19] + 0x50, &asked, 8) && asked) {   /* from nothing selected to one asked for: */
-        sel = g_let_go; *(volatile uint64_t *)(uintptr_t)(x[19] + 0x48) = sel;   /* through the update's own change of selection */
-    }                                                                              /* (from nothing, it takes the nearest one instead) */
-    if (sel) g_let_go = 0;
     x[0] = sel; u->uc_mcontext->__ss.__pc += 4; return 1;
 }
 static void ui_nav_install(Module *m) {
@@ -2288,29 +2281,4 @@ static void ui_nav_install(Module *m) {
 }
 
 
-/* Diagnostic "uifocus" (2026-10-29: no focus off the items): the panes around the selected element's pane and around
-   another one's (0x400 before to 0x800 after, at the same place): name, flags, alpha, to see which ones the selection shows. */
-void botw_uifocus(void) {
-    MenuHit h[64]; int sel = -1, n = runtime_ui_hits(h, 64, &sel);
-    if (sel < 0) { fprintf(stderr, "[uifocus] no selection (%d hits)\n", n); return; }
-    int other = sel > 0 ? sel - 1 : sel + 1; if (other >= n) other = -1;
-    for (int pass = 0; pass < 2; pass++) {
-        int i = pass ? other : sel; if (i < 0) break;
-        uint64_t ctl = 0, pane = 0; static uint8_t w[0xc00];
-        if (!camdump_read(h[i].id + 0x18, &ctl, 8) || !camdump_read(ctl + 0x60, &pane, 8) || !camdump_read(pane - 0x400, w, sizeof w)) continue;
-        fprintf(stderr, "[uifocus] %s element %#llx at %g %g\n", pass ? "other" : "selected", (unsigned long long)h[i].id, h[i].x, h[i].y);
-        for (uint64_t q = pane, k = 0; q && k < 8; k++) {   /* its parents (+0x18): translate +0x30, size +0x50 */
-            char nm[25] = {0}; float t[2] = {0}, sz[2] = {0}; camdump_read(q + 0xb8, nm, 24); camdump_read(q + 0x30, t, 8); camdump_read(q + 0x50, sz, 8);
-            fprintf(stderr, "[uifocus]   parent %llu %#llx %-16s translate %g %g size %g %g\n", (unsigned long long)k, (unsigned long long)q, nm, t[0], t[1], sz[0], sz[1]);
-            if (!camdump_read(q + 0x18, &q, 8)) break; }
-        for (size_t o = 0; o + 0xb8 + 16 <= sizeof w; o += 8) {
-            const char *nm = (const char *)w + o + 0xb8;
-            if (!((nm[0] >= 'A' && nm[0] <= 'Z') && (nm[1] == '_' || nm[2] == '_') && memchr(nm, 0, 16))) continue;
-            float px, py; memcpy(&px, w + o + 0x7c, 4); memcpy(&py, w + o + 0x8c, 4);
-            fprintf(stderr, "[uifocus]   %+5ld %#llx %-14s %7.1f %7.1f flags %02x alpha %3u\n", (long)o - 0x400, (unsigned long long)(pane - 0x400 + o), nm, px, py, w[o + 0x58], w[o + 0x5a]);
-        }
-    }
-}
 
-/* Diagnostic "poke8 <hex address> <hex byte>": one byte written (a pane's flags or alpha, to see what it shows). */
-void botw_poke8(uint64_t a, unsigned v) { uint8_t old = 0; if (camdump_read(a, &old, 1)) { *(volatile uint8_t *)(uintptr_t)a = (uint8_t)v; fprintf(stderr, "[poke8] %#llx %02x -> %02x\n", (unsigned long long)a, old, v & 0xff); } }
