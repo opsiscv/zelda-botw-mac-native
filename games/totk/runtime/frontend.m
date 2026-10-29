@@ -192,12 +192,14 @@ static void caps_hid_start(void){
 /* The game has no mouse controls. In native full screen, keep the pointer out of the picture while idle, but show it again
    as soon as it moves; restore it when the window loses focus or leaves full screen. */
 void runtime_input_key_synthetic(unsigned code,int down);
-static int titleMode,titleFrame,titleTarget=-1,titleConfirm,titleScroll,titleFollow;   /* titleScroll: wheel steps to make (+ down); titleFollow: the pointer moved, follow it */
+static int titleMode,titleFrame,titleFree,titleTarget=-1,titleConfirm,titleScroll,titleFollow;   /* titleScroll: wheel steps to make (+ down); titleFollow: the pointer moved, follow it */
 static unsigned titleKey;static NSCursor *titleCursor;   /* titleFrame: a menu with the selection frame */
 static CGPoint pointerSaved;static int pointerHasSaved;   /* where the menu pointer was, given back the next time a menu takes the mouse */
 -(void)resetCursorRects{if(titleMode&&titleCursor)[self addCursorRect:self.bounds cursor:titleCursor];else [super resetCursorRects];}   /* the title menu's pointer, kept by AppKit */
 -(void)hideCursorIfIdle:(NSTimer *)timer{
- (void)timer;self.cursorHideTimer=nil;if(titleMode)return;
+ (void)timer;self.cursorHideTimer=nil;
+ if(titleFree&&self.window.isKeyWindow){if(!self.cursorIsHidden){[NSCursor hide];self.cursorIsHidden=YES;}return;}   /* a cutscene: the free pointer out of the picture while idle */
+ if(titleMode)return;
  if(!self.cursorAutoHideActive||!self.window.isKeyWindow||!(self.window.styleMask&NSWindowStyleMaskFullScreen))return;
  if(!self.cursorIsHidden){[NSCursor hide];self.cursorIsHidden=YES;}
 }
@@ -210,7 +212,8 @@ static int title_item_at(NSView *v,NSEvent *e){NSPoint p=[v convertPoint:e.locat
  if(mouseHeld){runtime_mouse_move(e.deltaX,e.deltaY);return;}
  if(titleMode){titleFollow=2;NSPoint m=NSEvent.mouseLocation;pointerSaved=CGPointMake(m.x,NSMaxY(NSScreen.screens.firstObject.frame)-m.y);pointerHasSaved=1;
   [self.cursorHideTimer invalidate];self.cursorHideTimer=nil;if(self.cursorIsHidden){[NSCursor unhide];self.cursorIsHidden=NO;}
-  int i=title_item_at(self,e);if(i>=0)titleTarget=i;if(titleCursor)[titleCursor set];return;}
+  if(titleFree)self.cursorHideTimer=[NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(hideCursorIfIdle:) userInfo:nil repeats:NO];
+  int i=titleFree?-1:title_item_at(self,e);if(i>=0)titleTarget=i;if(titleCursor)[titleCursor set];return;}
  if(!self.cursorAutoHideActive)return;
  [self.cursorHideTimer invalidate];self.cursorHideTimer=nil;
  if(self.cursorIsHidden){[NSCursor unhide];self.cursorIsHidden=NO;}
@@ -224,7 +227,7 @@ static int title_item_at(NSView *v,NSEvent *e){NSPoint p=[v convertPoint:e.locat
 -(void)mouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
 -(void)rightMouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
 -(void)otherMouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
--(void)mouseDown:(NSEvent *)e{if(titleMode&&!mouseHeld){int i=titleFrame?-1:title_item_at(self,e);if(titleFrame||i>=0){titleTarget=i;titleConfirm=1;titleFollow=1;}return;}if(mouseHeld)runtime_mouse_button(0,1);}
+-(void)mouseDown:(NSEvent *)e{if(titleMode&&!mouseHeld){int i=titleFrame||titleFree?-1:title_item_at(self,e);if(titleFrame||titleFree||i>=0){titleTarget=i;titleConfirm=1;titleFollow=1;}return;}if(mouseHeld)runtime_mouse_button(0,1);}
 -(void)mouseUp:(NSEvent *)e{(void)e;runtime_mouse_button(0,0);}
 -(void)rightMouseDown:(NSEvent *)e{(void)e;if(titleMode&&!mouseHeld){if(!titleKey){titleKey=56;runtime_input_key_synthetic(56,1);}return;}if(mouseHeld)runtime_mouse_button(1,1);}   /* menus: B */   /* no context menu */
 -(void)rightMouseUp:(NSEvent *)e{(void)e;runtime_mouse_button(1,0);}
@@ -256,19 +259,20 @@ static void title_tick(void){   /* main thread, every 8 ms: one d-pad step towar
  if(titleKey){runtime_input_key_synthetic(titleKey,0);titleKey=0;return;}   /* the press stays pending until the game reads it */
  int on=runtime_mouse_enabled()&&!settingsOpen;float fr[4];
 extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) shows the same frame: not a pointer menu */
- int cur=on&&runtime_title_cursor?runtime_title_cursor():-1,frame=cur<0&&on&&!runtime_input_dpad_held()&&runtime_menu_frame&&runtime_menu_frame(fr),mode=cur>=0||frame;
- titleFrame=frame;
- {static uint64_t offAt;uint64_t t=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);   /* a page turning or an animation hides the frame a moment: */
-  int world=runtime_game_world_live&&runtime_game_world_live();                 /* the pointer mode holds through it, so the pointer is not */
-  if(mode||world)offAt=0;                                                        /* taken and given back (put back where it was) every time */
-  else if(titleMode){if(!offAt)offAt=t;if(t-offAt<500000000ull)return;}}
+ int cur=on&&runtime_title_cursor?runtime_title_cursor():-1,frame=cur<0&&on&&!runtime_input_dpad_held()&&runtime_menu_frame&&runtime_menu_frame(fr);
+ int world=!runtime_game_world_live||runtime_game_world_live(),pm=menu_pointer_mode(on,cur,frame,world),mode=pm>=MENU_POINTER_TITLE;
+ titleFrame=frame;titleFree=pm==MENU_POINTER_FREE;
+ {static uint64_t offAt;uint64_t t=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);   /* the world going on a moment (a menu's camera, a page */
+  if(mode)offAt=0;                                                               /* turning): the pointer mode holds through it, so the */
+  else if(titleMode){if(!offAt)offAt=t;if(t-offAt<500000000ull)return;}}        /* pointer is not taken and given back every time */
  if(mode!=titleMode){titleMode=mode;titleTarget=-1;titleConfirm=0;front_mouse_update();
   if(mode){if(!titleCursor){char path[4096];extern int runtime_setting_path(const char *,char *,size_t);NSImage *im=runtime_setting_path("cursor.png",path,sizeof path)?[[NSImage alloc] initWithContentsOfFile:@(path)]:nil;
     if(im){im.size=NSMakeSize(24,24*im.size.height/fmax(1,im.size.width));titleCursor=[[NSCursor alloc] initWithImage:im hotSpot:NSMakePoint(1,1)];}else titleCursor=NSCursor.arrowCursor;}
    [titleCursor set];window.acceptsMouseMovedEvents=YES;}   /* the hover needs moves in a window too */
   [window invalidateCursorRectsForView:window.contentView];
-  fprintf(stderr,"[totk] menu pointer: %s\n",mode?(frame?"a menu with the selection frame":"the title menu"):"off");}
+  fprintf(stderr,"[totk] menu pointer: %s\n",mode?(frame?"a menu with the selection frame":titleFree?"free (the world stopped)":"the title menu"):"off");}
  if(!mode){titleScroll=0;return;}
+ if(titleFree){titleScroll=0;if(titleConfirm){titleConfirm=0;titleKey=38;runtime_input_key_synthetic(38,1);}return;}   /* the map, a dialog: a click is A */
  {static NSPoint last;NSPoint m=NSEvent.mouseLocation;   /* the pointer read here too: moves are not always delivered after a screen change */
   if(m.x!=last.x||m.y!=last.y){last=m;titleFollow=2;
    if(!frame){NSView *v=window.contentView;NSPoint p=title_pointer(v);

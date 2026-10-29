@@ -34,6 +34,18 @@ static inline int menu_title_index(float x, float y, int *count) {
     return -1;
 }
 
+/* Who has the mouse (frontend.m title_tick; user 2026-10-29: the pointer is the Mac's own, where the mouse is, not put
+   back in the middle): the window holds it only while the world goes on (the camera); the title, a menu with a selection
+   frame (walked to the item under the pointer) and anything else that stops the world (the map, a dialog, a cutscene:
+   FREE, a click is A, the right button B) leave the pointer free. on: mouse mode. */
+enum { MENU_POINTER_OFF, MENU_POINTER_HELD, MENU_POINTER_TITLE, MENU_POINTER_FRAME, MENU_POINTER_FREE };
+static inline int menu_pointer_mode(int on, int title_cursor, int frame, int world) {
+    if (!on) return MENU_POINTER_OFF;
+    if (title_cursor >= 0) return MENU_POINTER_TITLE;
+    if (frame) return MENU_POINTER_FRAME;   /* the caller leaves out the quick-select bar's frame (the d-pad held) */
+    return world ? MENU_POINTER_HELD : MENU_POINTER_FREE;
+}
+
 /* Other menus (no pointer of their own): the mouse movement walks the selection like the d-pad, a step per
    MENU_STEP_POINTS of movement along the bigger axis (mouse down = down); a step clears the other axis. */
 enum { MENU_UP = 1, MENU_DOWN, MENU_LEFT, MENU_RIGHT };

@@ -60,6 +60,14 @@ int main(void) {
     int n = 0; for (int i = 0; i < 10; i++) n += menu_wheel(&wh, 11.0 + 0.01 * i, -1.0);
     check(n >= 9 && n <= 10, "a fast spin (a line per event): a step per line");
 
+    /* Who has the mouse (menu_pointer_mode): the window only in the world; anywhere else the pointer is free. */
+    check(menu_pointer_mode(1, -1, 0, 1) == MENU_POINTER_HELD, "the world: the mouse turns the camera");
+    check(menu_pointer_mode(1, 2, 0, 0) == MENU_POINTER_TITLE, "the title menu");
+    check(menu_pointer_mode(1, -1, 1, 0) == MENU_POINTER_FRAME, "a menu with a selection frame");
+    check(menu_pointer_mode(1, -1, 0, 0) == MENU_POINTER_FREE, "the map, a dialog, a cutscene: the pointer, free");
+    check(menu_pointer_mode(0, -1, 0, 0) == MENU_POINTER_OFF, "mouse mode off: the system's pointer");
+    check(menu_pointer_mode(1, -1, 1, 1) == MENU_POINTER_FRAME, "a frame while the camera still updates (a dialog's choices): the frame");
+
     printf("menu-pointer: %d/%d checks pass\n", checked - failures, checked);
     return failures != 0;
 }
