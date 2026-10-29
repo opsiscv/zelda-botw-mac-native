@@ -25,6 +25,8 @@ enum { HORSE_CAM_RET = 0xd7f850 };   /* CameraHorse's update returns here (ret, 
 enum { HORSE_AI_SITE = 0x2a3960, HORSE_AI_WORD = 0xf9400660 };   /* HorseRiddenByPlayer's per-frame step (main+0x2a3900), at its ldr x0, [x19, #8] after the rider is fetched */
 static uint8_t *g_horse_ai_main;
 static void key_icons_start(void);
+static uint8_t *g_nav_main; static void ui_nav_install(Module *m);   /* menu hover, end of file */
+enum { UI_NAV_SITE = 0x134e924, UI_NAV_WORD = 0xf9400bf5 };   /* ldr x21, [sp, #0x10] */
 static uint8_t *g_horse_ret_main;
 enum { INV_PAGE_SITE = 0x11b66f8, INV_PAGE_WORD = 0xb9761c08, INV_PAGE_TURN = 0x11c1090, INV_PAGE_BACK = 0x11b6fcc };   /* the inventory pages, before botw_jq_hook */
 static uint8_t *g_inv_main; static _Atomic int g_inv_pages;
@@ -642,6 +644,7 @@ void runtime_game_patches(Module *m) {
       if (runtime_setting_word("pitch-hold.txt", w, sizeof w)) g_tilt_hold_s = fmax(0, atof(w));
       fprintf(stderr, "[botw] mouse camera: a mouse tilt holds %g s before the game levels the view\n", g_tilt_hold_s); }
     if (!ios_code()) key_icons_start();   /* the button icons follow the world and the menus (end of file) */
+    ui_nav_install(m);
     { uint32_t w; memcpy(&w, m->base + HORSE_AI_SITE, 4);
       if (w == HORSE_AI_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d6u << 5); memcpy(m->base + HORSE_AI_SITE, &b, 4); g_horse_ai_main = m->base; }
       fprintf(stderr, "[botw] horse ridden step: %s\n", g_horse_ai_main ? "hooked" : "not hooked"); }
@@ -964,9 +967,11 @@ static int horse_ai_hook(ucontext_t *u) {
     camdump_read(x[19] + 8, &x[0], 8);   /* ldr x0, [x19, #8] */
     u->uc_mcontext->__ss.__pc += 4; return 1;
 }
+static int ui_nav_hook(ucontext_t *u);
 int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was one of ours, handled */
     if (g_horse_ai_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ai_main + HORSE_AI_SITE) return horse_ai_hook(context);
     if (watch_trap(context)) return 1;
+    if (g_nav_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_nav_main + UI_NAV_SITE) return ui_nav_hook(context);
     if (g_horse_ret_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ret_main + HORSE_CAM_RET) return horse_ret_hook(context);
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + INV_PAGE_SITE) return inv_page_hook(context);
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + QUEST_SITE) {
@@ -2092,4 +2097,99 @@ static void key_icons_start(void) {
     fclose(f);
     pthread_t t; pthread_create(&t, NULL, key_icons_run, &k); pthread_detach(t);
     fprintf(stderr, "[botw] key icons: %s, %u sheet pairs\n", path, k.count);
+}
+
+/* Diagnostic "uilist" (global menu hover research 2026-10-29): the menu cursor object (cursor_object: the selection
+   frame's owner), its fields, and its list of selectable elements (node at +8: prev, next) walked from the selected one
+   (+0x48): in each element, every layout pane (a name at +0xb8) within 0x800 bytes, with its global place (+0x7c, +0x8c),
+   size (+0x50) and flags (+0x58). */
+void botw_uilist(void) {
+    uint64_t obj = cursor_object(), sel = 0; uint64_t f[16];
+    if (!obj) { fprintf(stderr, "[uilist] no cursor object\n"); return; }
+    if (camdump_read(obj, f, sizeof f)) for (int i = 0; i < 16; i++) fprintf(stderr, "[uilist] obj+%02x %016llx\n", i * 8, (unsigned long long)f[i]);
+    float at[2]; if (camdump_read(obj + 0x58, at, 8)) fprintf(stderr, "[uilist] cursor at %g %g\n", at[0], at[1]);
+    if (!camdump_read(obj + 0x48, &sel, 8) || !sel) return;
+    int n = 0;
+    for (int dir = 0; dir < 2; dir++) {
+        uint64_t e = sel;
+        for (int k = 0; k < 300; k++) {
+            if (dir == 0 || k > 0) {
+                static uint8_t body[0x900]; if (!camdump_read(e, body, sizeof body)) break;
+                fprintf(stderr, "[uilist] %d element %#llx%s\n", n++, (unsigned long long)e, e == sel ? " (selected)" : "");
+                for (size_t o = 0; o + 0xb8 + 16 <= sizeof body; o += 8) {
+                    const char *nm = (const char *)body + o + 0xb8;
+                    if (!((nm[0] >= 'A' && nm[0] <= 'Z') && (nm[1] == '_' || (nm[1] >= 'a' && nm[1] <= 'z')) && nm[2] && memchr(nm, 0, 16))) continue;
+                    int ok = 1; for (int c = 0; nm[c]; c++) if (!(nm[c] == '_' || (nm[c] >= '0' && nm[c] <= '9') || (nm[c] >= 'A' && nm[c] <= 'Z') || (nm[c] >= 'a' && nm[c] <= 'z'))) ok = 0;
+                    if (!ok) continue;
+                    float x, y, sz[2]; memcpy(&x, body + o + 0x7c, 4); memcpy(&y, body + o + 0x8c, 4); memcpy(sz, body + o + 0x50, 8);
+                    fprintf(stderr, "[uilist]    +%03zx %-16s pos %8.1f %8.1f size %6.1f %6.1f flags %02x alpha %u\n", o, nm, x, y, sz[0], sz[1], body[o + 0x58], body[o + 0x5a]);
+                }
+            }
+            uint64_t node[2]; if (!camdump_read(e + 8, node, sizeof node)) break;
+            uint64_t nx = dir == 0 ? node[1] : node[0];
+            if (!nx || nx - 8 == sel) break;
+            e = nx - 8;
+        }
+    }
+    fprintf(stderr, "[uilist] done %d elements\n", n);
+}
+
+/* The hit boxes of the menu on screen (menu_grid.h MenuHit, frontend.m): the cursor object's elements (botw_uilist),
+   each by its button pane, the one the game puts the cursor on (element +0x18, +0x60: main+0x134e95c), global place
+   (+0x7c, +0x8c), size (+0x50) times the global scale (+0x70, +0x84), or the size of its bounding pane B_Hit_* (the
+   touch area, at the same place in the panes after it); the selected one is at the cursor's place. Only shown ones (visible flag 0x01 at +0x58) on the screen, and no empty inventory slot (its
+   N_Born_00 hidden: flag 0x80). Returns how many, *selected the selected element's index (-1 if it has none); 0: no menu. */
+int runtime_ui_hits(MenuHit *out, int max, int *selected) {
+    *selected = -1;
+    uint64_t obj = cursor_object(), sel = 0;
+    if (!obj || !camdump_read(obj + 0x48, &sel, 8) || !sel) return 0;
+    int n = 0;
+    for (int dir = 0; dir < 2; dir++) {
+        uint64_t e = sel;
+        for (int k = 0; k < 300 && n < max; k++) {
+            if (dir == 0 || k > 0) {
+                uint64_t ctl = 0, pane = 0; static uint8_t body[0x900];   /* the element's button pane: element +0x18, +0x60 */
+                if (camdump_read(e + 0x18, &ctl, 8) && ctl && camdump_read(ctl + 0x60, &pane, 8) && pane && camdump_read(pane, body, sizeof body)) {
+                    float x, y, sz[2], m00, m11; memcpy(&x, body + 0x7c, 4); memcpy(&y, body + 0x8c, 4); memcpy(sz, body + 0x50, 8);
+                    memcpy(&m00, body + 0x70, 4); memcpy(&m11, body + 0x84, 4);
+                    float w = sz[0] * fabsf(m00), h = sz[1] * fabsf(m11); int empty = 0;
+                    for (size_t o = 8; o + 0xb8 + 16 <= sizeof body; o += 8) {   /* its parts after it: the hit box, the item mark */
+                        float px, py; memcpy(&px, body + o + 0x7c, 4); memcpy(&py, body + o + 0x8c, 4);
+                        if (fabsf(px - x) > 1 || fabsf(py - y) > 1) continue;
+                        if (!memcmp(body + o + 0xb8, "B_Hit_", 6)) { float hs[2], a00, a11; memcpy(hs, body + o + 0x50, 8); memcpy(&a00, body + o + 0x70, 4); memcpy(&a11, body + o + 0x84, 4); w = hs[0] * fabsf(a00); h = hs[1] * fabsf(a11); }
+                        if (!memcmp(body + o + 0xb8, "N_Born_00", 10) && !(body[o + 0x58] & 0x80)) empty = 1;   /* an inventory slot with no item */
+                    }
+                    if ((body[0x58] & 1) && !empty && fabsf(x) <= 640 && fabsf(y) <= 360) out[n++] = (MenuHit){ x, y, w, h, e };
+                }
+            }
+            uint64_t node[2]; if (!camdump_read(e + 8, node, sizeof node)) break;
+            uint64_t nx = dir == 0 ? node[1] : node[0];
+            if (!nx || nx - 8 == sel) break;
+            e = nx - 8;
+        }
+    }
+    float at[2];   /* the selected one: where the cursor is (+0x58, its button's place; +0x48 is not always it) */
+    if (camdump_read(obj + 0x58, at, sizeof at))
+        for (int i = 0; i < n; i++) if (fabsf(out[i].x - at[0]) < 3 && fabsf(out[i].y - at[1]) < 3) { *selected = i; break; }
+    return n;
+}
+
+/* Selecting an element at once (user 2026-10-29: hover, not a walk through the items in between). The cursor object's
+   d-pad step (main+0x134e600's function: of the elements on that side of the cursor it takes the nearest within an angle,
+   then at main+0x134e924 loads it from [sp+0x10] and selects it: +0x48, the old element's 0x138 and the new one's 0x130
+   (its description, its frame)). The hook there takes runtime_ui_select's element instead, so one d-pad press toward
+   it lands on it with the game's own selection. Only for that cursor object (x19), once. */
+static _Atomic uint64_t g_nav_obj, g_nav_target;
+int runtime_ui_nav_hooked(void) { return g_nav_main != NULL; }
+void runtime_ui_select(uint64_t element) { atomic_store(&g_nav_obj, cursor_object()); atomic_store(&g_nav_target, element); }
+static int ui_nav_hook(ucontext_t *u) {
+    uint64_t *x = u->uc_mcontext->__ss.__x, cand = 0, want = atomic_exchange(&g_nav_target, 0);
+    camdump_read(u->uc_mcontext->__ss.__sp + 0x10, &cand, 8);
+    x[21] = want && x[19] == atomic_load(&g_nav_obj) ? want : cand;
+    u->uc_mcontext->__ss.__pc += 4; return 1;
+}
+static void ui_nav_install(Module *m) {
+    uint32_t w; memcpy(&w, m->base + UI_NAV_SITE, 4);
+    if (w == UI_NAV_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d9u << 5); memcpy(m->base + UI_NAV_SITE, &b, 4); g_nav_main = m->base; }
+    fprintf(stderr, "[botw] menu hover: the cursor's d-pad step %s\n", g_nav_main ? "hooked" : "not hooked");
 }

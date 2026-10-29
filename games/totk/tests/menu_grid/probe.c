@@ -43,6 +43,21 @@ int main(void) {
     int nn = menu_slots_complete(none, 3, 20);
     check(nn == 20 && menu_slot_at(none, nn, -476, 97) < 0, "an empty page: the put-back slots hold nothing");
 
+    /* Any menu with the cursor's element list (menu_hit_*): each element's hit box (B_Hit_00), the one under the
+       pointer, and the d-pad step from the selected one toward it. */
+    {
+        MenuHit h[4] = { { -260, -30, 430, 64, 0 }, { -260, -100, 430, 64, 0 }, { -260, -170, 430, 64, 0 }, { -289, 191, 32, 32, 0 } };
+        check(menu_hit_at(h, 4, -100, -95) == 1, "the pointer on the second quest");
+        check(menu_hit_at(h, 4, -100, -65) < 0, "between two rows: nothing");
+        check(menu_hit_at(h, 4, 100, -95) < 0, "right of the list: nothing");
+        check(menu_hit_step(h, 0, 2) == MENU_DOWN, "a row further down: down");
+        check(menu_hit_step(h, 2, 0) == MENU_UP, "back up: up");
+        MenuHit g[2] = { { -476, 97, 90, 90, 0 }, { -378, -1, 90, 90, 0 } };
+        check(menu_hit_step(g, 0, 1) == MENU_DOWN || menu_hit_step(g, 0, 1) == MENU_RIGHT, "a diagonal: one of its two ways");
+        MenuHit r[2] = { { -476, 97, 90, 90, 0 }, { -280, 97, 90, 90, 0 } };
+        check(menu_hit_step(r, 1, 0) == MENU_LEFT, "to the left: left");
+    }
+
     printf("menu-grid: %d/%d checks pass\n", checked - failures, checked);
     return failures != 0;
 }

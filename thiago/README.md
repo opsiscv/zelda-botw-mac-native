@@ -86,6 +86,10 @@ não estão no mod (ficam em outro pacote).
 ## Outros ajustes deste fork
 
 - Sem o quadro preto ao abrir a barra de armas ou o inventário (`games/totk/third_party/d2r_gfx/gfx/nvn/present_hold.h`).
+- Mouse nos menus: o cursor do Mac fica solto fora do mundo; no inventário, no diário e nas listas o item embaixo do
+  cursor é selecionado direto (o passo do direcional do jogo é desviado para ele: `runtime_ui_select`), nada entre
+  os itens; a roda rola a lista do diário.
+- `update_runtime.py` testa o runtime novo de uma cópia fora do `.partial` (as janelas "Verificando ….app.partial").
 - Cavalo com WASD, câmera livre a cavalo, Esc abre o menu e Tab o mapa, roda do mouse nas abas do diário.
 - `scripts/launch_manual.sh`: abre uma sessão de teste no save manual (com log em `~/Library/Logs/MacNativeGames/botw.log`).
 

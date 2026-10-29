@@ -279,15 +279,6 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
     int i=menu_title_item(v.bounds.size.width,v.bounds.size.height,p.x,p.y,title_count());if(i>=0)titleTarget=i;}}}
  if(frame){   /* a frame menu */
   uint64_t now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  extern int runtime_quest_log_live(void) __attribute__((weak));
-  extern int runtime_quest_tab(void) __attribute__((weak));
-  {static unsigned key;static uint64_t until;static int from;   /* the Adventure Log: a wheel notch turns one tab, a right-stick flick held */
-   int tab=runtime_quest_tab?runtime_quest_tab():-1;                /* until the game has turned it (its tab changed), then the next at once */
-   if(key&&(tab!=from||now>=until)){runtime_input_key_synthetic(key,0);key=0;fprintf(stderr,"[qtab] %.3f tab %d (%s)\n",now/1e9,tab,tab!=from?"turned":"timeout");}
-   if(runtime_quest_log_live&&runtime_quest_log_live()){
-    if(titleScroll>2)titleScroll=2;if(titleScroll<-2)titleScroll=-2;   /* no notches left over to run on after the wheel stops */
-    if(titleScroll&&!key){key=titleScroll>0?124:123;titleScroll+=titleScroll>0?-1:1;from=tab;runtime_input_key_synthetic(key,1);until=now+200000000ull;fprintf(stderr,"[qtab] %.3f press %u from %d\n",now/1e9,key,tab);}
-    titleFollow=titleFollow==2?1:titleFollow;if(titleScroll||key)return;}}
   if(menu_frame_small(fr)){   /* the inventory (menu_grid.h): the item slot under the mouse, by the game's own map of the page */
    extern int runtime_inventory_slots(MenuSlot *,int,int *) __attribute__((weak));
    static MenuSlot slots[MENU_SLOTS_MAX];static int waiting;static uint64_t until;static int fromSel=-1;
@@ -299,6 +290,8 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
    if(titleScroll){runtime_inventory_page(titleScroll);titleScroll=0;titleFollow=1;return;}   /* the wheel: a page per notch, the game's own page turn */
    int target=n?menu_slot_at(slots,n,lx,ly):-1;
    if(titleConfirm&&target<0&&n&&(lx<MENU_GRID_PAGE_LEFT_X||lx>MENU_GRID_PAGE_RIGHT_X)&&fabs(ly)<260){titleConfirm=0;runtime_inventory_page(lx<MENU_GRID_PAGE_LEFT_X?-1:1);titleFollow=1;return;}   /* a click on a page arrow */
+   extern int runtime_ui_nav_hooked(void) __attribute__((weak));
+   if(!(runtime_ui_nav_hooked&&runtime_ui_nav_hooked())){   /* no direct selection: walked slot by slot */
    if(titleFollow==2)titleFollow=1;
    if(target<0||sel<0){if(titleConfirm&&target<0)titleConfirm=0;return;}   /* nothing under the mouse: nothing at all */
    if(target==sel){titleFollow=0;if(titleConfirm){titleConfirm=0;titleKey=38;runtime_input_key_synthetic(38,1);}return;}   /* there: a click is A */
@@ -307,7 +300,33 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
    if(k<=0)return;
    static const unsigned dpad[5]={0,5,9,3,11};titleKey=dpad[path[0]];runtime_input_key_synthetic(titleKey,1);   /* one step, the rest once it is taken */
    fromSel=sel;waiting=1;until=now+150000000ull;
-   return;}
+   return;}}
+  {/* any menu with the cursor's element list (menu_grid.h MenuHit: the inventory, the Adventure Log, ...): the element
+      under the pointer is selected with one d-pad press the game lands on it (runtime_ui_select), nothing between
+      elements; the wheel scrolls (a row per notch, the arrow keys turn the tabs) */
+   extern int runtime_ui_hits(MenuHit *,int,int *) __attribute__((weak));
+   extern int runtime_ui_nav_hooked(void) __attribute__((weak));
+   static MenuHit hits[MENU_SLOTS_MAX];static int hwait,stuck;static uint64_t huntil;static float hfrom[2];
+   int hsel=-1,hn=runtime_ui_hits?runtime_ui_hits(hits,MENU_SLOTS_MAX,&hsel):0;
+   if(menu_frame_small(fr)){int k=0,ks=-1;for(int i=0;i<hn;i++){if(hits[i].x<MENU_GRID_PAGE_LEFT_X-10||hits[i].x>MENU_GRID_PAGE_RIGHT_X+10)continue;   /* the inventory: its page only */
+     if(i==hsel)ks=k;hits[k++]=hits[i];}hsel=ks;hn=k;}
+   if(hn>0){
+    float cx=hsel>=0?hits[hsel].x:1e9f,cy=hsel>=0?hits[hsel].y:1e9f;
+    if(hwait){int same=cx==hfrom[0]&&cy==hfrom[1];if(same&&now<huntil)return;stuck=same?stuck+1:0;hwait=0;}   /* the last step not taken yet */
+    if(titleScroll){titleKey=titleScroll>0?9:5;titleScroll+=titleScroll>0?-1:1;runtime_input_key_synthetic(titleKey,1);
+     hfrom[0]=cx;hfrom[1]=cy;hwait=1;huntil=now+150000000ull;titleFollow=0;return;}
+    NSView *v=window.contentView;NSPoint p=title_pointer(v);double w=v.bounds.size.width,h=v.bounds.size.height,sc=fmin(w/1280,h/720);
+    int target=menu_hit_at(hits,hn,(p.x-(w-1280*sc)/2)/sc-640,(p.y-(h-720*sc)/2)/sc-360);
+    if(titleFollow==2){titleFollow=1;stuck=0;}
+    if(target<0||hsel<0){titleConfirm=0;return;}   /* nothing under the pointer: nothing at all */
+    if(target==hsel){titleFollow=0;stuck=0;if(titleConfirm){titleConfirm=0;titleKey=38;runtime_input_key_synthetic(38,1);}return;}   /* there: a click is A */
+    if(stuck>=2){titleConfirm=0;return;}   /* the d-pad does not get there (a tab icon): left alone until the pointer moves */
+    if(!titleFollow&&!titleConfirm)return;
+    static const unsigned dpad[5]={0,5,9,3,11};titleKey=dpad[menu_hit_step(hits,hsel,target)];
+    extern void runtime_ui_select(uint64_t) __attribute__((weak));
+    if(titleKey&&runtime_ui_select&&runtime_ui_nav_hooked&&runtime_ui_nav_hooked())runtime_ui_select(hits[target].id);   /* the press lands on it at once */
+    if(titleKey){runtime_input_key_synthetic(titleKey,1);hfrom[0]=cx;hfrom[1]=cy;hwait=1;huntil=now+150000000ull;}
+    return;}}
   /* a list (saves, Start / Cancel, options): one row at a time toward the pointer, the next as soon as the frame moved */
   static float last[4];static int waiting;static uint64_t until;
   if(waiting){int same=fr[0]==last[0]&&fr[1]==last[1]&&fr[2]==last[2]&&fr[3]==last[3];if(same&&now<until)return;waiting=0;}

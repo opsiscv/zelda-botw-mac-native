@@ -215,8 +215,14 @@ def probe_runtime(tmp, version, logs):
     or file written."""
     res, log = tmp / 'Contents/Resources/totk', logs / 'runtime-probe.log'
     env = {k: v for k, v in os.environ.items() if not k.startswith(('TOTK_', 'DM_'))}
-    r = subprocess.run([res / 'build/totk-native', f'rewritten/{version}', 'probe'], cwd=res, env=env, capture_output=True,
-                       text=True, timeout=600)
+    # Run from a copy outside the .partial app: a program started inside an app folder makes macOS check the whole app
+    # first, and its "Verifying Breath of the Wild.app.partial" windows stayed on screen after the folder was renamed.
+    exe = logs / 'totk-native-probe'
+    clone(res / 'build/totk-native', exe)
+    try:
+        r = subprocess.run([exe, f'rewritten/{version}', 'probe'], cwd=res, env=env, capture_output=True, text=True, timeout=600)
+    finally:
+        exe.unlink(missing_ok=True)
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text(r.stdout + r.stderr)
     if r.returncode or '"status":"pass"' not in r.stdout:

@@ -6,6 +6,7 @@
    leaves the page. Layout units (1280 x 720, centre 0,0, y up). Plain C: tests/menu_grid/probe.c. */
 #pragma once
 #include <math.h>
+#include <stdint.h>
 #include "menu_pointer.h"
 
 #define MENU_SLOT_HALF 45.0   /* half a slot's square */
@@ -71,4 +72,20 @@ static inline int menu_slots_complete(MenuSlot *s, int n, int max) {
         if (!found && n < max) s[n++] = (MenuSlot){ x, y, any && c == 0 && r == 0 };
     }
     return n;
+}
+
+/* Any menu with the cursor's element list (game_patches_botw.c runtime_ui_hits: the inventory's slots, the Adventure
+   Log's quests and tabs, ...): each element's hit box, the bounding pane B_Hit_00 its layout gives for touch (centre and
+   size, layout units). The pointer selects only what it is on (user 2026-10-29: hover, nothing between items); the
+   selection is walked there with the d-pad, a step along the bigger axis at a time, since the game has no pointer. */
+typedef struct { float x, y, w, h; uint64_t id; } MenuHit;   /* id: the game's element (runtime_ui_select) */
+static inline int menu_hit_at(const MenuHit *h, int n, double x, double y) {
+    for (int i = 0; i < n; i++)
+        if (fabs(x - h[i].x) <= h[i].w / 2 && fabs(y - h[i].y) <= h[i].h / 2) return i;
+    return -1;
+}
+static inline int menu_hit_step(const MenuHit *h, int from, int to) {
+    double dx = h[to].x - h[from].x, dy = h[to].y - h[from].y;
+    if (fabs(dx) < 1 && fabs(dy) < 1) return 0;
+    return fabs(dy) >= fabs(dx) ? (dy > 0 ? MENU_UP : MENU_DOWN) : (dx > 0 ? MENU_RIGHT : MENU_LEFT);
 }

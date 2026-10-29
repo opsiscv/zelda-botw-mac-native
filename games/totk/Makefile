@@ -225,6 +225,12 @@ probe-present-hold:
 	@mkdir -p build/tests
 	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror -Ithird_party/d2r_gfx/gfx/nvn tests/present_hold/probe.c -o build/tests/present_hold_probe
 	build/tests/present_hold_probe
+.PHONY: probe-menu-grid
+probe-menu-grid:
+	@mkdir -p build/tests
+	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror -Iruntime tests/menu_grid/probe.c -o build/tests/menu_grid_probe
+	build/tests/menu_grid_probe
+
 .PHONY: probe-menu-pointer
 probe-menu-pointer:
 	@mkdir -p build/tests
