@@ -223,6 +223,7 @@ def romfs_file(path):
 # "X Jump"...), drawn as the font's glyph of the same button. The world's keys: the HUD is the world's.
 HUD = {'Nt_KeyTexA_00^d': 0, 'Nt_KeyTexB_00^d': 1, 'Nt_KeyTexX_00^d': 2, 'Nt_KeyTexY_00^d': 3, 'Nt_KeyTexL_00^d': 4,
        'Nt_KeyTexZL_00^d': 6, 'Nt_KeyTexLSt_00^d': 15, 'Nt_KeyTexLSt_01^d': 26}
+HUD_GONE = ('Nt_KeyBtnSubBaseAL_00^s', 'Nt_KeyBtnSubBaseBL_00^s')
 PACK, LAYOUT, BNTX = 'Pack/Bootup.pack', 'Layout/Common.sblarc', 'timg/__Combined.bntx'
 
 
@@ -231,17 +232,22 @@ def hud_pack(draws):
     pack = romfs_file(PACK); layout = {n: (a, e) for n, a, e in sarc_files(pack)}[LAYOUT]
     c = pack[layout[0]:layout[1]]; d = bytearray(yaz0_decode(c))
     a, e = {n: (a, e) for n, a, e in sarc_files(d)}[BNTX]; tex = bntx_bc4.textures(d[a:e]); changed = []
-    for name, glyph in HUD.items():
-        if glyph not in draws: continue
-        off, w, h, bh, fmt = tex[name]; assert fmt >> 8 == 2, f'{name}: not R8'
-        at = a + off; size = bntx_bc4.r8_size(w, h, bh)
-        px = bntx_bc4.deswizzle(d[at:at + size], w, h, 1, bh)
+    def redo(name, draw):   # the texture redrawn inside its own picture's box
+        nonlocal d
+        info = tex[name]; off, w, h, bh, fmt = info; px = bntx_bc4.read_tex(d[a:e], info)
         xs = [x for y in range(h) for x in range(w) if px[y * w + x] > 40]; ys = [y for y in range(h) for x in range(w) if px[y * w + x] > 40]
         box = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
-        if getattr(draws[glyph], 'wide', False): box = (1, box[1], w - 1, box[3])
-        big = Image.new('L', (w * SS, h * SS), 0); draws[glyph](ImageDraw.Draw(big), tuple(v * SS for v in box))
-        d[at:at + size] = bntx_bc4.swizzle(big.resize((w, h), Image.LANCZOS).tobytes(), w, h, 1, bh, size)
-        changed.append((at, at + size))
+        if getattr(draw, 'wide', False): box = (1, box[1], w - 1, box[3])
+        big = Image.new('L', (w * SS, h * SS), 0); draw(ImageDraw.Draw(big), tuple(v * SS for v in box))
+        bntx = bntx_bc4.write_tex(d[a:e], info, big.resize((w, h), Image.LANCZOS).tobytes())
+        size = bntx_bc4.level_geometry(w, h, bh, fmt)[3]; d[a + off:a + off + size] = bntx[off:off + size]
+        changed.append((a + off, a + off + size))
+    for name, glyph in HUD.items():
+        if glyph in draws: redo(name, draws[glyph])
+    # The prompt's base: a key's rounded square instead of the Switch button's circle; the faint four-button guide
+    # beside it (X / Y / B round A) left out.
+    redo('Nt_KeyBtnBaseLL_00^s', lambda dr, b: dr.rounded_rectangle(b, radius=(b[3] - b[1]) // 4, fill=255))
+    for name in HUD_GONE: redo(name, lambda dr, b: None)
     c2 = yaz0_patch(c, bytes(d), changed); assert yaz0_decode(c2) == bytes(d)
     return sarc_replace(pack, LAYOUT, c2)
 

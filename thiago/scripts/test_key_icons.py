@@ -93,6 +93,14 @@ class Sheet(unittest.TestCase):
         font = arc[a:e]
         self.assertEqual(bntx_bc4.encode(font, bntx_bc4.decode(font)), font)
 
+    def test_tex_round_trip(self):
+        w, h, bh = 60, 65, 2
+        for fmt in (0x201, 0x1d01):
+            wb, hb, bpb, size = bntx_bc4.level_geometry(w, h, bh, fmt)
+            px = bytes(255 if (x // 8 + y // 8) % 2 else 0 for y in range(h) for x in range(w))
+            data = bntx_bc4.write_tex(bytes(size + 16), (16, w, h, bh, fmt), px)
+            self.assertEqual(bntx_bc4.read_tex(data, (16, w, h, bh, fmt)), px)
+
     def test_swizzle_round_trip(self):
         w, h, bh = 32, 256, 16
         lin = bytes(i * 7 % 251 for i in range(w * h * 8))

@@ -101,3 +101,37 @@ def textures(bntx):
 
 def r8_size(w, h, bh):   # bytes of a block-linear R8 level: whole GOB columns and blocks
     return -(-w // GOB_W) * GOB_W * -(-h // (GOB_H * bh)) * GOB_H * bh
+
+
+def level_geometry(w, h, bh, fmt):
+    """(width in blocks, height in blocks, bytes per block, size) of an R8 or BC4 texture's level 0."""
+    wb, hb, bpb = (w, h, 1) if fmt >> 8 == 2 else (-(-w // 4), -(-h // 4), 8)
+    assert fmt >> 8 in (2, 0x1d), f'not R8 or BC4: {fmt:#x}'
+    return wb, hb, bpb, -(-wb * bpb // GOB_W) * GOB_W * -(-hb // (GOB_H * bh)) * GOB_H * bh
+
+
+def read_tex(data, info):
+    """Grey pixels (w x h bytes, rows top-down) of an R8 or BC4 texture (info: textures()' tuple, offset into data)."""
+    off, w, h, bh, fmt = info; wb, hb, bpb, size = level_geometry(w, h, bh, fmt)
+    lin = deswizzle(data[off:off + size], wb, hb, bpb, bh)
+    if bpb == 1: return bytes(lin)
+    px = bytearray(w * h)
+    for by in range(hb):
+        for bx in range(wb):
+            for k, v in enumerate(bc4_decode_block(lin[(by * wb + bx) * 8:][:8])):
+                x, y = bx * 4 + k % 4, by * 4 + k // 4
+                if x < w and y < h: px[y * w + x] = v
+    return bytes(px)
+
+
+def write_tex(data, info, px):
+    """data with the texture's level 0 replaced by px (as read_tex gives them)."""
+    off, w, h, bh, fmt = info; wb, hb, bpb, size = level_geometry(w, h, bh, fmt)
+    if bpb == 1: lin = bytes(px)
+    else:
+        lin = bytearray()
+        for by in range(hb):
+            for bx in range(wb):
+                lin += bc4_encode_block([px[min(by * 4 + k // 4, h - 1) * w + min(bx * 4 + k % 4, w - 1)] for k in range(16)])
+    out = bytearray(data); out[off:off + size] = swizzle(bytes(lin), wb, hb, bpb, bh, size)
+    return bytes(out)
