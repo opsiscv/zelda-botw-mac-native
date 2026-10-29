@@ -225,6 +225,15 @@ probe-present-hold:
 	@mkdir -p build/tests
 	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror -Ithird_party/d2r_gfx/gfx/nvn tests/present_hold/probe.c -o build/tests/present_hold_probe
 	build/tests/present_hold_probe
+.PHONY: check
+# The lint of this fork (2026-10-29): the changed runtime files compiled with every warning an error, no link, then the
+# logic tests. Seconds, no game files; make check before a build.
+check:
+	xcrun clang -fsyntax-only -std=gnu11 -DGAME_BOTW=1 -DGAME_BOTW160=1 -Iruntime -Ithird_party/d2r_gfx/gfx/nvn/include -Ibuild -Wall -Wextra -Werror -Wno-deprecated-declarations runtime/game_patches_botw.c runtime/input.c
+	xcrun clang -fsyntax-only -fobjc-arc -DGAME_BOTW=1 -Iruntime -Ithird_party/d2r_gfx/gfx/nvn/include -Wall -Wextra -Werror -Wno-deprecated-declarations runtime/frontend.m runtime/gamepad.m
+	$(MAKE) probe-menu-grid probe-menu-pointer probe-key-map probe-key-icons probe-space-skip probe-horse-coast
+	cd ../.. && python3 -m unittest tests.test_mouse
+
 .PHONY: probe-menu-grid
 probe-menu-grid:
 	@mkdir -p build/tests

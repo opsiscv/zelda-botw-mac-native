@@ -150,7 +150,7 @@ static unsigned space_key(void){int r=space_role(!runtime_game_world_live||runti
  return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
 /* A window key after the settings panel: what it presses depends on where the game is (above). */
 static void front_key_down(unsigned short code,int repeat){
- if(mouseLast){mouseLast=0;extern void runtime_ui_refocus(void) __attribute__((weak));if(runtime_ui_refocus)runtime_ui_refocus();}   /* the keyboard: a selection again */
+ if(mouseLast&&code!=53&&code!=48&&code!=12&&code!=14){mouseLast=0;extern void runtime_ui_refocus(void) __attribute__((weak));if(runtime_ui_refocus)runtime_ui_refocus();}   /* the keyboard: a selection again; not for Esc (it closes, user 2026-10-29: given back first it showed Cancel taken), Tab, Q, E */
  if(code==56&&in_menu())return;   /* Shift in a menu: nothing (only Esc goes back) */
  if(code==53){if(!repeat)escAs=esc_is_plus(!runtime_game_world_live||runtime_game_world_live(),(runtime_title_cursor&&runtime_title_cursor()>=0)||(titleMode&&!titleFree),pause_menu_open())?53:56;runtime_input_key(escAs,1);return;}
  if(code==14){if(!repeat)eAs=pause_tabs_open()?59:in_menu()?KEY_NONE:14;runtime_input_key(eAs,1);return;}   /* E in the pause menu: the next tab (R, Control), as Q (L) the one before; A in the world */

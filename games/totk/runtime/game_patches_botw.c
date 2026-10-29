@@ -26,7 +26,7 @@ enum { HORSE_AI_SITE = 0x2a3960, HORSE_AI_WORD = 0xf9400660 };   /* HorseRiddenB
 static uint8_t *g_horse_ai_main;
 static void key_icons_start(void);
 static uint8_t *g_nav_main; static void ui_nav_install(Module *m);   /* menu hover, end of file */
-enum { UI_UPDATE_SITE = 0x134e48c, UI_LETGO_SITE = 0x134e4f8 };
+enum { UI_UPDATE_SITE = 0x134e48c, UI_LETGO_SITE = 0x134e4f8, UI_ENSURE_SITE = 0x134f170 };
 static uint8_t *g_horse_ret_main;
 enum { INV_PAGE_SITE = 0x11b66f8, INV_PAGE_WORD = 0xb9761c08, INV_PAGE_TURN = 0x11c1090, INV_PAGE_BACK = 0x11b6fcc };   /* the inventory pages, before botw_jq_hook */
 static uint8_t *g_inv_main; static _Atomic int g_inv_pages;
@@ -971,7 +971,8 @@ static int ui_nav_hook(ucontext_t *u);
 int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was one of ours, handled */
     if (g_horse_ai_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ai_main + HORSE_AI_SITE) return horse_ai_hook(context);
     if (watch_trap(context)) return 1;
-    if (g_nav_main && (((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_nav_main + UI_UPDATE_SITE || ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_nav_main + UI_LETGO_SITE)) return ui_nav_hook(context);
+    if (g_nav_main) { uint64_t pc = ((ucontext_t *)context)->uc_mcontext->__ss.__pc - (uintptr_t)g_nav_main;
+        if (pc == UI_UPDATE_SITE || pc == UI_LETGO_SITE || pc == UI_ENSURE_SITE) return ui_nav_hook(context); }
     if (g_horse_ret_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ret_main + HORSE_CAM_RET) return horse_ret_hook(context);
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + INV_PAGE_SITE) return inv_page_hook(context);
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + QUEST_SITE) {
@@ -2236,7 +2237,8 @@ int runtime_ui_hits(MenuHit *out, int max, int *selected) {
    nothing (no focus at all) runtime_ui_unfocus: at main+0x134e48c the selected element is let go with the game's own
    call (main+0x134e4e8: its 0x138, as when another is taken), then main+0x134e4f8 goes on to the nothing-selected way;
    with none selected the update goes there at once, instead of picking one again (main+0x134eb30). A key, or the
-   pointer on an element, ends it. Only for that cursor object (x19). */
+   pointer on an element, ends it. The other per-frame step that picks one when none is selected (main+0x134f170, the
+   same ldr x0, [x19, #0x48]; it made the frame blink, 2026-10-29) skips the pick for it too. Only for that cursor object (x19). */
 enum { UI_UPDATE_WORD = 0xf9402660,   /* ldr x0, [x19, #0x48] at UI_UPDATE_SITE */
        UI_LETGO_WORD = 0xb40001d4,    /* cbz x20, main+0x134e530 at UI_LETGO_SITE, after the old element's 0x138 */
        UI_DESELECT = 0x134e4e8, UI_NOTHING = 0x134e610 };
@@ -2258,6 +2260,11 @@ static int ui_nav_hook(ucontext_t *u) {
         return 1;
     }
     camdump_read(x[19] + 0x48, &sel, 8);
+    if (pc == UI_ENSURE_SITE) {   /* the other per-frame step that picks one when none is selected (main+0x134f100) */
+        if (!sel && x[19] == atomic_load(&g_unfocus_obj)) u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + 0x134f194;   /* none: it stays none */
+        else { x[0] = sel; u->uc_mcontext->__ss.__pc += 4; }
+        return 1;
+    }
     if (x[19] == atomic_load(&g_unfocus_obj)) {
         if (sel) {   /* let it go the game's way, then nothing selected */
             *(volatile uint64_t *)(uintptr_t)(x[19] + 0x48) = 0; x[21] = sel; g_letgo = 1; g_let_go = sel;
@@ -2273,9 +2280,9 @@ static int ui_nav_hook(ucontext_t *u) {
     x[0] = sel; u->uc_mcontext->__ss.__pc += 4; return 1;
 }
 static void ui_nav_install(Module *m) {
-    uint32_t a, b; memcpy(&a, m->base + UI_UPDATE_SITE, 4); memcpy(&b, m->base + UI_LETGO_SITE, 4);
-    if (a == UI_UPDATE_WORD && b == UI_LETGO_WORD && !ios_code()) {
-        uint32_t t = 0xd4200000u | (0x7d9u << 5); memcpy(m->base + UI_UPDATE_SITE, &t, 4); memcpy(m->base + UI_LETGO_SITE, &t, 4); g_nav_main = m->base;
+    uint32_t a, b, c; memcpy(&a, m->base + UI_UPDATE_SITE, 4); memcpy(&b, m->base + UI_LETGO_SITE, 4); memcpy(&c, m->base + UI_ENSURE_SITE, 4);
+    if (a == UI_UPDATE_WORD && b == UI_LETGO_WORD && c == UI_UPDATE_WORD && !ios_code()) {   /* the same ldr x0, [x19, #0x48] */
+        uint32_t t = 0xd4200000u | (0x7d9u << 5); memcpy(m->base + UI_UPDATE_SITE, &t, 4); memcpy(m->base + UI_LETGO_SITE, &t, 4); memcpy(m->base + UI_ENSURE_SITE, &t, 4); g_nav_main = m->base;
     }
     fprintf(stderr, "[botw] menu hover: the cursor's update %s\n", g_nav_main ? "hooked" : "not hooked");
 }
