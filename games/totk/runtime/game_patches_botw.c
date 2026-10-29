@@ -26,7 +26,7 @@ enum { HORSE_AI_SITE = 0x2a3960, HORSE_AI_WORD = 0xf9400660 };   /* HorseRiddenB
 static uint8_t *g_horse_ai_main;
 static void key_icons_start(void);
 static uint8_t *g_nav_main; static void ui_nav_install(Module *m);   /* menu hover, end of file */
-enum { UI_NAV_SITE = 0x134e924, UI_NAV_WORD = 0xf9400bf5 };   /* ldr x21, [sp, #0x10] */
+enum { UI_UPDATE_SITE = 0x134e48c, UI_LETGO_SITE = 0x134e4f8 };
 static uint8_t *g_horse_ret_main;
 enum { INV_PAGE_SITE = 0x11b66f8, INV_PAGE_WORD = 0xb9761c08, INV_PAGE_TURN = 0x11c1090, INV_PAGE_BACK = 0x11b6fcc };   /* the inventory pages, before botw_jq_hook */
 static uint8_t *g_inv_main; static _Atomic int g_inv_pages;
@@ -971,7 +971,7 @@ static int ui_nav_hook(ucontext_t *u);
 int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was one of ours, handled */
     if (g_horse_ai_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ai_main + HORSE_AI_SITE) return horse_ai_hook(context);
     if (watch_trap(context)) return 1;
-    if (g_nav_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_nav_main + UI_NAV_SITE) return ui_nav_hook(context);
+    if (g_nav_main && (((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_nav_main + UI_UPDATE_SITE || ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_nav_main + UI_LETGO_SITE)) return ui_nav_hook(context);
     if (g_horse_ret_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ret_main + HORSE_CAM_RET) return horse_ret_hook(context);
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + INV_PAGE_SITE) return inv_page_hook(context);
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + QUEST_SITE) {
@@ -2174,7 +2174,7 @@ int runtime_ui_hits(MenuHit *out, int max, int *selected) {
        it), so only the group of the selected element counts: +0x48, or the one the frame is on (+0x58; a long list
        reuses its rows and +0x48 can be left behind). */
     uint64_t obj = cursor_object(), a20 = 0, a80 = 0, gm = 0, groups = 0, flagsp = 0, sel = 0; int32_t count = 0, end = 0;
-    if (!obj || !camdump_read(obj + 0x48, &sel, 8) || !sel || !camdump_read(obj + 0x20, &a20, 8) || !camdump_read(a20 + 0x80, &a80, 8) || !camdump_read(a80 + 0x28, &gm, 8) ||
+    if (!obj || !camdump_read(obj + 0x48, &sel, 8) || !camdump_read(obj + 0x20, &a20, 8) || !camdump_read(a20 + 0x80, &a80, 8) || !camdump_read(a80 + 0x28, &gm, 8) ||
         !camdump_read(gm + 0x28, &count, 4) || !camdump_read(gm + 0x30, &groups, 8) || !camdump_read(gm + 0x38, &end, 4) ||
         !camdump_read(gm + 0x40, &flagsp, 8) || count <= 0 || count > 128) return 0;
     int8_t fl[128]; if (!camdump_read(flagsp, fl, (size_t)count)) return 0;
@@ -2186,7 +2186,7 @@ int runtime_ui_hits(MenuHit *out, int max, int *selected) {
         if (!camdump_read(groups + 8 * (uint64_t)g, &grp, 8) || !camdump_read(grp + 0x90, &node, 8) || !camdump_read(grp + 0x9c, &off, 4)) continue;
         int start = n, mine = 0;
         for (int k = 0; k < 300 && n < max && node && node != grp + 0x88; k++) {
-            uint64_t e = node - (uint64_t)(int64_t)off; mine |= e == sel;
+            uint64_t e = node - (uint64_t)(int64_t)off; mine |= sel && e == sel;   /* none selected: the frame's last place */
             int before = n;
             /* the element's pane (+0x18, +0x60: the hit box B_Hit_00 in the inventory and the log) and the panes around it
                at the same place: the hit box, and N_Born_00 (before it) without flag 0x80 for an empty inventory slot */
@@ -2214,34 +2214,58 @@ int runtime_ui_hits(MenuHit *out, int max, int *selected) {
     return n;
 }
 
-/* Selecting an element at once (user 2026-10-29: hover, not a walk through the items in between). The cursor object's
-   d-pad step (main+0x134e600's function: of the elements on that side of the cursor it takes the nearest within an angle,
-   then at main+0x134e924 loads it from [sp+0x10] and selects it: +0x48, the old element's 0x138 and the new one's 0x130
-   (its description, its frame)). The hook there takes runtime_ui_select's element instead, so one d-pad press toward
-   it lands on it with the game's own selection. Only for that cursor object (x19), once. */
-static _Atomic uint64_t g_nav_obj, g_nav_target;
+/* The menu cursor's per-frame update (main+0x134e410, the cursor object in x19; x20 its owner, [x0+0x20]+0x80):
+   +0x48 the selected element, +0x50 an element asked for, which the update selects itself (main+0x134e4b8: the old
+   element's 0x138, +0x48, the frame's place +0x58, the new one's 0x130, its description), and with +0x48 null it
+   takes the game's own "nothing selected" way (main+0x134e610: +0x48 cleared, the owner's 0x30 with -1: no frame).
+   With the pointer on an element (user 2026-10-29: hover) runtime_ui_select asks for it there. With the pointer on
+   nothing (no focus at all) runtime_ui_unfocus: at main+0x134e48c the selected element is let go with the game's own
+   call (main+0x134e4e8: its 0x138, as when another is taken), then main+0x134e4f8 goes on to the nothing-selected way;
+   with none selected the update goes there at once, instead of picking one again (main+0x134eb30). A key, or the
+   pointer on an element, ends it. Only for that cursor object (x19). */
+enum { UI_UPDATE_WORD = 0xf9402660,   /* ldr x0, [x19, #0x48] at UI_UPDATE_SITE */
+       UI_LETGO_WORD = 0xb40001d4,    /* cbz x20, main+0x134e530 at UI_LETGO_SITE, after the old element's 0x138 */
+       UI_DESELECT = 0x134e4e8, UI_NOTHING = 0x134e610 };
+static _Atomic uint64_t g_unfocus_obj; static int g_letgo;   /* g_letgo: the update's thread, between the two sites */
+static uint64_t g_let_go;   /* the element let go: put back as the selected one for a moment when one is asked for again */
 int runtime_ui_nav_hooked(void) { return g_nav_main != NULL; }
-void runtime_ui_select(uint64_t element) { atomic_store(&g_nav_obj, cursor_object()); atomic_store(&g_nav_target, element); }
+void runtime_ui_select(uint64_t element) {
+    uint64_t obj = cursor_object(); if (!obj) return;
+    atomic_store(&g_unfocus_obj, 0); *(volatile uint64_t *)(uintptr_t)(obj + 0x50) = element;
+}
+void runtime_ui_unfocus(void) { atomic_store(&g_unfocus_obj, cursor_object()); }
+void runtime_ui_refocus(void) { atomic_store(&g_unfocus_obj, 0); }
+int runtime_ui_unfocused(void) { uint64_t o = atomic_load(&g_unfocus_obj); return o && o == cursor_object(); }
 static int ui_nav_hook(ucontext_t *u) {
-    uint64_t *x = u->uc_mcontext->__ss.__x, cand = 0, want = atomic_exchange(&g_nav_target, 0);
-    camdump_read(u->uc_mcontext->__ss.__sp + 0x10, &cand, 8);
-    x[21] = want && x[19] == atomic_load(&g_nav_obj) ? want : cand;
-    u->uc_mcontext->__ss.__pc += 4; return 1;
+    uint64_t *x = u->uc_mcontext->__ss.__x, pc = u->uc_mcontext->__ss.__pc - (uintptr_t)g_nav_main, sel = 0;
+    if (pc == UI_LETGO_SITE) {
+        if (g_letgo) { g_letgo = 0; u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + UI_NOTHING; return 1; }
+        if (!x[20]) u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + 0x134e530; else u->uc_mcontext->__ss.__pc += 4;
+        return 1;
+    }
+    camdump_read(x[19] + 0x48, &sel, 8);
+    if (x[19] == atomic_load(&g_unfocus_obj)) {
+        if (sel) {   /* let it go the game's way, then nothing selected */
+            *(volatile uint64_t *)(uintptr_t)(x[19] + 0x48) = 0; x[21] = sel; g_letgo = 1; g_let_go = sel;
+            u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + UI_DESELECT; return 1;
+        }
+        u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + UI_NOTHING; return 1;
+    }
+    uint64_t asked = 0;
+    if (!sel && g_let_go && camdump_read(x[19] + 0x50, &asked, 8) && asked) {   /* from nothing selected to one asked for: */
+        sel = g_let_go; *(volatile uint64_t *)(uintptr_t)(x[19] + 0x48) = sel;   /* through the update's own change of selection */
+    }                                                                              /* (from nothing, it takes the nearest one instead) */
+    if (sel) g_let_go = 0;
+    x[0] = sel; u->uc_mcontext->__ss.__pc += 4; return 1;
 }
 static void ui_nav_install(Module *m) {
-    uint32_t w; memcpy(&w, m->base + UI_NAV_SITE, 4);
-    if (w == UI_NAV_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d9u << 5); memcpy(m->base + UI_NAV_SITE, &b, 4); g_nav_main = m->base; }
-    fprintf(stderr, "[botw] menu hover: the cursor's d-pad step %s\n", g_nav_main ? "hooked" : "not hooked");
+    uint32_t a, b; memcpy(&a, m->base + UI_UPDATE_SITE, 4); memcpy(&b, m->base + UI_LETGO_SITE, 4);
+    if (a == UI_UPDATE_WORD && b == UI_LETGO_WORD && !ios_code()) {
+        uint32_t t = 0xd4200000u | (0x7d9u << 5); memcpy(m->base + UI_UPDATE_SITE, &t, 4); memcpy(m->base + UI_LETGO_SITE, &t, 4); g_nav_main = m->base;
+    }
+    fprintf(stderr, "[botw] menu hover: the cursor's update %s\n", g_nav_main ? "hooked" : "not hooked");
 }
 
-/* The selection frame shown or not (user 2026-10-29: the frame only on what the pointer is on, nothing otherwise): the
-   frame's part Pa_Cursor_00, the parent (+0x18) of its corner's parent, its visible flag (bit 0 of +0x58). */
-void runtime_ui_frame_show(int show) {
-    uint64_t p = title_pane(), q = 0; char nm[16] = {0}; uint8_t fl;
-    if (!p || !camdump_read(p + 0x18, &q, 8) || !q || !camdump_read(q + 0x18, &p, 8) || !p || !camdump_read(p + 0xb8, nm, 13) || memcmp(nm, "Pa_Cursor_00", 13) || !camdump_read(p + 0x58, &fl, 1)) return;
-    uint8_t want = show ? (fl | 1) : (fl & ~1);
-    if (want != fl) *(volatile uint8_t *)(uintptr_t)(p + 0x58) = want;
-}
 
 /* Diagnostic "uifocus" (2026-10-29: no focus off the items): the panes around the selected element's pane and around
    another one's (0x400 before to 0x800 after, at the same place): name, flags, alpha, to see which ones the selection shows. */
