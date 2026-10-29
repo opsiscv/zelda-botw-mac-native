@@ -68,3 +68,10 @@ não estão no mod (ficam em outro pacote).
 - Sem o quadro preto ao abrir a barra de armas ou o inventário (`games/totk/third_party/d2r_gfx/gfx/nvn/present_hold.h`).
 - Cavalo com WASD, câmera livre a cavalo, Esc abre o menu e Tab o mapa, roda do mouse nas abas do diário.
 - `scripts/launch_manual.sh`: abre uma sessão de teste no save manual (com log em `~/Library/Logs/MacNativeGames/botw.log`).
+
+## Créditos
+
+Todo o port (o carregador do jogo, o NVN em Metal, o áudio, os patches do jogo e as ferramentas de compilação) é do
+projeto [MacNativeGames](https://github.com/ly05010419/MacNativeGames), dos seus contribuidores
+(licença MIT: `LICENSE`; componentes de terceiros: `THIRD_PARTY_NOTICES.md`). Este repositório é um fork dele, com
+os ajustes listados acima. A engenharia reversa se apoia também no decomp [zeldaret/botw](https://github.com/zeldaret/botw).
