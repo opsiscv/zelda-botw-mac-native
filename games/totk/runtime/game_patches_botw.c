@@ -2166,7 +2166,12 @@ void botw_uilist(void) {
    touch area, at the same place in the panes after it); the selected one is at the cursor's place. Only shown ones (visible flag 0x01 at +0x58, alpha +0x5a not 0, and so are all its parents: a closed dialog's
    buttons are hidden by its root), and no empty inventory slot (its
    N_Born_00 hidden: flag 0x80). Returns how many, *selected the selected element's index (-1 if it has none); 0: no menu. */
-int runtime_ui_hits(MenuHit *out, int max, int *selected) {
+static int ui_hits(MenuHit *out, int max, int *selected, int all);
+static uint64_t g_last_group;   /* ui_hits: the group the selection was last in */
+int runtime_ui_hits(MenuHit *out, int max, int *selected) { return ui_hits(out, max, selected, 0); }
+/* The title's items: its elements are the arrow's anchors, never shown, so all of them (frontend.m title_select). */
+int runtime_ui_elements(MenuHit *out, int max, int *selected) { return ui_hits(out, max, selected, 1); }
+static int ui_hits(MenuHit *out, int max, int *selected, int all) {
     *selected = -1;
     /* The groups the d-pad step looks through (main+0x134e654..0x134e924): the cursor's group set (+0x20, +0x80, +0x28):
        count +0x28, groups +0x30, first-past-active +0x38, a signed byte per group +0x40 (negative: left out); from
@@ -2188,7 +2193,8 @@ int runtime_ui_hits(MenuHit *out, int max, int *selected) {
         if (!camdump_read(groups + 8 * (uint64_t)g, &grp, 8) || !camdump_read(grp + 0x90, &node, 8) || !camdump_read(grp + 0x9c, &off, 4)) continue;
         int start = n, mine = 0;
         for (int k = 0; k < 300 && n < max && node && node != grp + 0x88; k++) {
-            uint64_t e = node - (uint64_t)(int64_t)off; mine |= sel && e == sel;   /* none selected: the frame's last place */
+            uint64_t e = node - (uint64_t)(int64_t)off; mine |= sel && e == sel;
+            mine |= !sel && grp == g_last_group;   /* none selected: the group last in use (a page turn moves every element) */
             int before = n;
             /* the element's pane (+0x18, +0x60: the hit box B_Hit_00 in the inventory and the log) and the panes around it
                at the same place: the hit box, and N_Born_00 (before it) without flag 0x80 for an empty inventory slot */
@@ -2204,9 +2210,9 @@ int runtime_ui_hits(MenuHit *out, int max, int *selected) {
                     if (o > BEFORE && !memcmp(win + o + 0xb8, "B_Hit_", 6)) { float hs[2], a00, a11; memcpy(hs, win + o + 0x50, 8); memcpy(&a00, win + o + 0x70, 4); memcpy(&a11, win + o + 0x84, 4); w = hs[0] * fabsf(a00); h = hs[1] * fabsf(a11); }
                     if (!memcmp(win + o + 0xb8, "N_Born_00", 10) && !(win[o + 0x58] & 0x80)) empty = 1;
                 }
-                int shown = (body[0x58] & 1) && body[0x5a];   /* it and every parent (+0x18): visible (flag 0x01) and not see-through */
+                int shown = all || ((body[0x58] & 1) && body[0x5a]);   /* it and every parent (+0x18): visible (flag 0x01) and not see-through */
                 uint64_t up = 0; camdump_read(pane + 0x18, &up, 8);
-                for (int k = 0; shown && up && k < 24; k++) {
+                for (int k = 0; shown && !all && up && k < 24; k++) {
                     uint8_t f[3] = {0}; char nm[8] = {0}; if (!camdump_read(up + 0x58, f, 3)) break; shown = (f[0] & 1) && f[2];
                     if (shown && camdump_read(up + 0xb8, nm, 6) && !memcmp(nm, "N_Cut", 5)) {   /* a list's clip area: rows scrolled out of it are not on screen */
                         float c[2], cs[2], c00, c11; camdump_read(up + 0x7c, c, 4); camdump_read(up + 0x8c, c + 1, 4); camdump_read(up + 0x50, cs, 8); camdump_read(up + 0x70, &c00, 4); camdump_read(up + 0x84, &c11, 4);
@@ -2222,6 +2228,7 @@ int runtime_ui_hits(MenuHit *out, int max, int *selected) {
             if (!camdump_read(node + 8, &node, 8)) break;
         }
         if (!mine) n = start;   /* only the selected element's group: the popup's, not the page behind it */
+        else if (n > start) g_last_group = grp;
     }
     for (int i = 0; sel && i < n; i++) if (out[i].id == sel) { *selected = i; break; }   /* the selected element, or where the frame is */
     if (*selected < 0 && have_at)
