@@ -45,7 +45,7 @@ mouse liga na tecla 1, no painel de ajustes). O teclado está no código (`games
 
 - No mundo: E interage (A), Ctrl arremessa (R), Shift corre, botão direito do mouse puxa o arco e o esquerdo atira,
   botão do meio arremessa, esquerdo ataca e, com uma runa na mão, usa a runa (A).
-- Nas cenas: Espaço pula (manda X e + juntos; se o jogo perguntar, Enter confirma).
+- Nas cenas e diálogos: Espaço manda A e X juntos (continua e acelera o diálogo, pula a cena).
 - Nos menus: Enter e Espaço confirmam, Esc volta e fecha; E e Shift não fazem nada, exceto E, que vai para a próxima aba no
   inventário e no diário (Q volta). O mouse aponta e clica (esquerdo confirma, direito volta).
 

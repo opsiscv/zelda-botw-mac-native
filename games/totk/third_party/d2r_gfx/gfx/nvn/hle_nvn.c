@@ -2927,14 +2927,12 @@ void dm_nvn_probe_present_interval(void) {
 int (*g_nvn_loadscreen_up)(void);   // 宿主登记：读取画面此刻是否开着（diag.c 订阅界面消息时填；图形单测里为空 = 不设闸） | host registration: whether the loading screen is up right now (filled in when diag.c subscribes to UI messages; null in graphics unit tests = no gate)
 // The present itself: screenshot hook, then the present queue (returns at once). frame != 0 (translation thread): also the
 // replay frame number, which the synchronous path sets at the end of nvnQueuePresentTexture.
-static _Atomic uint64_t g_frame_draws;   // the last presented frame's draws (runtime/space_skip.h: a cutscene or a menu)
-uint64_t runtime_frame_draws(void) { return atomic_load(&g_frame_draws); }
 static void present_exec(win_t *o, int idx, double period, const int crop[4], uint64_t frame) {
     gfx_enter();
     { static uint64_t last, prev; static int shown = -1; uint64_t ps, dr; mtl_stats(&ps, &dr);   // present_hold.h
       uint64_t d = dr >= last ? dr - last : 0; last = dr;
       if (present_hold(prev, d) && shown >= 0 && shown < o->ntex && shown != idx) idx = shown; else shown = idx;
-      prev = d; atomic_store(&g_frame_draws, d); }
+      prev = d; }
     { void mtl_shot_at_present(const tex_t *t); if (idx >= 0 && idx < o->ntex && idx < 4) mtl_shot_at_present(CTX(o->tex[idx])); }
     if (idx >= 0 && idx < o->ntex && idx < 4) o->ticket[idx] = mtl_present(CTX(o->tex[idx]), period, (int *)crop);   // 只入队，立即返回 | enqueue only, return immediately
     if (frame) mtl_set_frame(frame);
