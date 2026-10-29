@@ -1,6 +1,6 @@
-# Breath of the Wild no Mac: setup do Thiago
+# Zelda: Breath of the Wild no Mac (port nativo)
 
-Fork de [ly05010419/MacNativeGames](https://github.com/ly05010419/MacNativeGames) com os ajustes abaixo. Este repositório
+Port nativo de Breath of the Wild para Mac, feito sobre o método [MacNativeGames](https://github.com/ly05010419/MacNativeGames) (o código ARM64 do jogo roda direto no Apple Silicon, gráficos NVN em Metal), com os ajustes abaixo. Este repositório
 não tem nada do jogo: os arquivos do jogo e as chaves ficam fora dele (veja "O que guardar fora do GitHub").
 
 ## O que guardar fora do GitHub
@@ -18,7 +18,7 @@ Sem isto não dá para compilar. Tudo vem do seu próprio Switch:
 Requisitos: macOS em Apple Silicon, Xcode completo, Python 3.14. O README principal explica as dependências.
 
 ```sh
-git clone https://github.com/opsiscv/MacNativeGames.git ~/Games/MacNativeGames-BOTW
+git clone https://github.com/opsiscv/botw-mac-native.git ~/Games/MacNativeGames-BOTW
 cd ~/Games/MacNativeGames-BOTW && git checkout thiago-botw
 
 G="$HOME/Downloads/Games/Zelda BOTW"; W="$G/basegame/BotW_build"
