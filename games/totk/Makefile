@@ -225,6 +225,11 @@ probe-present-hold:
 	@mkdir -p build/tests
 	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror -Ithird_party/d2r_gfx/gfx/nvn tests/present_hold/probe.c -o build/tests/present_hold_probe
 	build/tests/present_hold_probe
+.PHONY: probe-space-skip
+probe-space-skip:
+	@mkdir -p build/tests
+	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror -Iruntime tests/space_skip/probe.c -o build/tests/space_skip_probe
+	build/tests/space_skip_probe
 .PHONY: probe-audio
 probe-audio: runtime
 	build/totk-native rewritten/v0 probe-audio > analysis/native-audio-probe.json

@@ -13,6 +13,7 @@
 #include "gamepad_layout.h"
 #include "menu_pointer.h"
 #include "menu_grid.h"
+#include "space_skip.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_mfx_mode.h"
 #include "../third_party/d2r_gfx/gfx/nvn/fps_overlay.h"
 static NSWindow *window;
@@ -133,14 +134,18 @@ extern int runtime_quest_log_live(void) __attribute__((weak));
 static int pause_tabs_open(void){if(runtime_game_world_live&&runtime_game_world_live())return 0;if(runtime_quest_log_live&&runtime_quest_log_live())return 1;MenuSlot slots[MENU_SLOTS_MAX];int sel;return runtime_inventory_slots&&runtime_inventory_slots(slots,MENU_SLOTS_MAX,&sel)>0;}
 static unsigned escAs,enterAs,eAs,spaceAs;
 static int in_menu(void){return runtime_game_world_live&&!runtime_game_world_live();}
-enum{KEY_NONE=255};   /* runtime_input_key ignores it */
+enum{KEY_NONE=255,KEY_SKIP=254};   /* runtime_input_key ignores them; KEY_SKIP: I (X) and Enter (+) together */
+extern uint64_t runtime_frame_draws(void) __attribute__((weak));
+extern int runtime_title_cursor(void) __attribute__((weak));
+static unsigned space_key(void){int r=space_role(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,runtime_frame_draws?runtime_frame_draws():0);
+ return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
 -(void)keyDown:(NSEvent *)e{if(settingsOpen&&e.keyCode!=18){if(e.keyCode==53)settings_show(0);return;}
  if(e.keyCode==53){if(!e.isARepeat)escAs=runtime_game_world_live&&!runtime_game_world_live()?56:53;runtime_input_key(escAs,1);return;}
  if(e.keyCode==14){if(!e.isARepeat)eAs=pause_tabs_open()?59:in_menu()?KEY_NONE:14;runtime_input_key(eAs,1);return;}   /* E in the pause menu: the next tab (R, Control), as Q (L) the one before; A in the world */
- if(e.keyCode==49){if(!e.isARepeat)spaceAs=in_menu()?38:49;runtime_input_key(spaceAs,1);return;}
+ if(e.keyCode==49){if(!e.isARepeat)spaceAs=space_key();if(spaceAs==KEY_SKIP){runtime_input_key(34,1);runtime_input_key(36,1);}else runtime_input_key(spaceAs,1);return;}   /* space_skip.h */
  if(e.keyCode==36){if(!e.isARepeat)enterAs=runtime_game_world_live&&!runtime_game_world_live()?38:36;runtime_input_key(enterAs,1);return;}   /* Enter in a menu: A */
  runtime_input_key(e.keyCode,1);}
--(void)keyUp:(NSEvent *)e{if(e.keyCode==53&&escAs){runtime_input_key(escAs,0);escAs=0;return;}if(e.keyCode==36&&enterAs){runtime_input_key(enterAs,0);enterAs=0;return;}if(e.keyCode==14&&eAs){runtime_input_key(eAs,0);eAs=0;return;}if(e.keyCode==49&&spaceAs){runtime_input_key(spaceAs,0);spaceAs=0;return;}runtime_input_key(e.keyCode,0);}
+-(void)keyUp:(NSEvent *)e{if(e.keyCode==53&&escAs){runtime_input_key(escAs,0);escAs=0;return;}if(e.keyCode==36&&enterAs){runtime_input_key(enterAs,0);enterAs=0;return;}if(e.keyCode==14&&eAs){runtime_input_key(eAs,0);eAs=0;return;}if(e.keyCode==49&&spaceAs){if(spaceAs==KEY_SKIP){runtime_input_key(34,0);runtime_input_key(36,0);}else runtime_input_key(spaceAs,0);spaceAs=0;return;}runtime_input_key(e.keyCode,0);}
 /* Caps Lock (ZL) pressed and released, read from the keyboards themselves: macOS's key events report only its lock state.
    Needs Input Monitoring (asked once); without it, flagsChanged falls back to the lock state. */
 static int capsHid;
