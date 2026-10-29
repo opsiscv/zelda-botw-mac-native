@@ -134,18 +134,18 @@ extern int runtime_quest_log_live(void) __attribute__((weak));
 static int pause_tabs_open(void){if(runtime_game_world_live&&runtime_game_world_live())return 0;if(runtime_quest_log_live&&runtime_quest_log_live())return 1;MenuSlot slots[MENU_SLOTS_MAX];int sel;return runtime_inventory_slots&&runtime_inventory_slots(slots,MENU_SLOTS_MAX,&sel)>0;}
 static unsigned escAs,enterAs,eAs,spaceAs;
 static int in_menu(void){return runtime_game_world_live&&!runtime_game_world_live();}
-enum{KEY_NONE=255,KEY_SKIP=254};   /* runtime_input_key ignores them; KEY_SKIP: J (A), I (X) and Enter (+) together */
+enum{KEY_NONE=255,KEY_SKIP=254};   /* runtime_input_key ignores them; KEY_SKIP: J (A) and I (X) together */
 extern int runtime_title_cursor(void) __attribute__((weak));
 static unsigned space_key(void){int r=space_role(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,pause_tabs_open());
  return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
 /* A window key after the settings panel: what it presses depends on where the game is (above). */
 static void front_key_down(unsigned short code,int repeat){
- if(code==53){if(!repeat)escAs=runtime_game_world_live&&!runtime_game_world_live()?56:53;runtime_input_key(escAs,1);return;}
+ if(code==53){if(!repeat)escAs=esc_is_plus(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,pause_tabs_open())?53:56;runtime_input_key(escAs,1);return;}
  if(code==14){if(!repeat)eAs=pause_tabs_open()?59:in_menu()?KEY_NONE:14;runtime_input_key(eAs,1);return;}   /* E in the pause menu: the next tab (R, Control), as Q (L) the one before; A in the world */
- if(code==49){if(!repeat){spaceAs=space_key();fprintf(stderr,"[totk-input] Space: %s\n",spaceAs==KEY_SKIP?"A, X and + (cutscene, dialog)":spaceAs==38?"A (menu)":"X (world)");}if(spaceAs==KEY_SKIP){runtime_input_key(38,1);runtime_input_key(34,1);runtime_input_key(36,1);}else runtime_input_key(spaceAs,1);return;}   /* space_skip.h */
+ if(code==49){if(!repeat){spaceAs=space_key();fprintf(stderr,"[totk-input] Space: %s\n",spaceAs==KEY_SKIP?"A and X (cutscene, dialog)":spaceAs==38?"A (menu)":"X (world)");}if(spaceAs==KEY_SKIP){runtime_input_key(38,1);runtime_input_key(34,1);}else runtime_input_key(spaceAs,1);return;}   /* space_skip.h */
  if(code==36){if(!repeat)enterAs=runtime_game_world_live&&!runtime_game_world_live()?38:36;runtime_input_key(enterAs,1);return;}   /* Enter in a menu: A */
  runtime_input_key(code,1);}
-static void front_key_up(unsigned short code){if(code==53&&escAs){runtime_input_key(escAs,0);escAs=0;return;}if(code==36&&enterAs){runtime_input_key(enterAs,0);enterAs=0;return;}if(code==14&&eAs){runtime_input_key(eAs,0);eAs=0;return;}if(code==49&&spaceAs){if(spaceAs==KEY_SKIP){runtime_input_key(38,0);runtime_input_key(34,0);runtime_input_key(36,0);}else runtime_input_key(spaceAs,0);spaceAs=0;return;}runtime_input_key(code,0);}
+static void front_key_up(unsigned short code){if(code==53&&escAs){runtime_input_key(escAs,0);escAs=0;return;}if(code==36&&enterAs){runtime_input_key(enterAs,0);enterAs=0;return;}if(code==14&&eAs){runtime_input_key(eAs,0);eAs=0;return;}if(code==49&&spaceAs){if(spaceAs==KEY_SKIP){runtime_input_key(38,0);runtime_input_key(34,0);}else runtime_input_key(spaceAs,0);spaceAs=0;return;}runtime_input_key(code,0);}
 /* input.txt "winkey <code> <ms>": a key as the window would get it, through front_key_down (runtime/input.c). */
 void runtime_front_key(unsigned code,unsigned ms){dispatch_async(dispatch_get_main_queue(),^{front_key_down((unsigned short)code,0);});
  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)ms*NSEC_PER_MSEC),dispatch_get_main_queue(),^{front_key_up((unsigned short)code);});}

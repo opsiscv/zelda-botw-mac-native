@@ -1,5 +1,6 @@
 // space_skip.h: Space is X in the world; in a cutscene or a dialog A and X together (A goes on and hurries the text, X
-// skips); in the inventory, the Adventure Log and the title screen only A (X sorts the inventory).
+// skips); in the inventory, the Adventure Log and the title screen only A (X sorts the inventory). Esc is + (the skip
+// in some cutscenes, the menu in the world) except in those menus, where it is B.
 #include <stdio.h>
 #include "space_skip.h"
 
@@ -12,6 +13,9 @@ int main(void) {
     check(space_role(0, 0, 1) == SPACE_CONFIRM, "the inventory or the Adventure Log: A only");
     check(space_role(0, 1, 0) == SPACE_CONFIRM, "the title screen: A only");
     check(space_role(1, 0, 1) == SPACE_WORLD, "the world wins over a stale menu sign");
+    check(esc_is_plus(0, 0, 0), "a cutscene or a dialog: Esc is +");
+    check(esc_is_plus(1, 0, 0), "the world: Esc is + (opens the menu)");
+    check(!esc_is_plus(0, 0, 1) && !esc_is_plus(0, 1, 0), "the inventory, the Adventure Log, the title: Esc is B");
     printf("space_skip: %d checks, %d failures\n", checked, failures);
     return failures != 0;
 }
