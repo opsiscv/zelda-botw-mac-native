@@ -141,6 +141,7 @@ __attribute__((constructor)) static void pause_menu_watch(void){   /* a popup op
  pauseWatch=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
  dispatch_source_set_timer(pauseWatch,DISPATCH_TIME_NOW,100*NSEC_PER_MSEC,20*NSEC_PER_MSEC);dispatch_source_set_event_handler(pauseWatch,^{pause_menu_open();});dispatch_resume(pauseWatch);}
 static unsigned escAs,enterAs,eAs,spaceAs,vAs;
+static int titleMode;   /* the pointer in a menu of the game (title_tick): the title, or a menu with a selection frame */
 static int mouseLast;   /* the pointer moved since the last key: the frame follows it (title_tick) */
 static int in_menu(void){return runtime_game_world_live&&!runtime_game_world_live();}
 enum{KEY_NONE=255,KEY_SKIP=254};   /* runtime_input_key ignores them; KEY_SKIP: J (A) and I (X) together */
@@ -151,7 +152,7 @@ static unsigned space_key(void){int r=space_role(!runtime_game_world_live||runti
 static void front_key_down(unsigned short code,int repeat){
  if(mouseLast){mouseLast=0;extern void runtime_ui_refocus(void) __attribute__((weak));if(runtime_ui_refocus)runtime_ui_refocus();}   /* the keyboard: a selection again */
  if(code==56&&in_menu())return;   /* Shift in a menu: nothing (only Esc goes back) */
- if(code==53){if(!repeat)escAs=esc_is_plus(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,pause_menu_open())?53:56;runtime_input_key(escAs,1);return;}
+ if(code==53){if(!repeat)escAs=esc_is_plus(!runtime_game_world_live||runtime_game_world_live(),(runtime_title_cursor&&runtime_title_cursor()>=0)||(titleMode&&!titleFree),pause_menu_open())?53:56;runtime_input_key(escAs,1);return;}
  if(code==14){if(!repeat)eAs=pause_tabs_open()?59:in_menu()?KEY_NONE:14;runtime_input_key(eAs,1);return;}   /* E in the pause menu: the next tab (R, Control), as Q (L) the one before; A in the world */
  if(code==9){if(!repeat)vAs=pause_tabs_open()?32:9;runtime_input_key(vAs,1);return;}   /* V in the inventory: sort (Y, U; the left click is A there); the d-pad's down elsewhere */
  if(code==49){if(!repeat){spaceAs=space_key();fprintf(stderr,"[totk-input] Space: %s\n",spaceAs==KEY_SKIP?"A and X (cutscene, dialog)":spaceAs==38?"A (menu)":"X (world)");}if(spaceAs==KEY_SKIP){runtime_input_key(38,1);runtime_input_key(34,1);}else runtime_input_key(spaceAs,1);return;}   /* space_skip.h */
@@ -194,7 +195,7 @@ static void caps_hid_start(void){
 /* The game has no mouse controls. In native full screen, keep the pointer out of the picture while idle, but show it again
    as soon as it moves; restore it when the window loses focus or leaves full screen. */
 void runtime_input_key_synthetic(unsigned code,int down);
-static int titleMode,titleFrame,titleFree,titleTarget=-1,titleConfirm,titleScroll,titleFollow;   /* titleScroll: wheel steps to make (+ down); titleFollow: the pointer moved, follow it */
+static int titleFrame,titleFree,titleTarget=-1,titleConfirm,titleScroll,titleFollow;   /* titleScroll: wheel steps to make (+ down); titleFollow: the pointer moved, follow it */
 static unsigned titleKey;static NSCursor *titleCursor;   /* titleFrame: a menu with the selection frame */
 static CGPoint pointerSaved;static int pointerHasSaved;   /* where the menu pointer was, given back the next time a menu takes the mouse */
 -(void)resetCursorRects{if(titleMode&&titleCursor)[self addCursorRect:self.bounds cursor:titleCursor];else [super resetCursorRects];}   /* the title menu's pointer, kept by AppKit */
