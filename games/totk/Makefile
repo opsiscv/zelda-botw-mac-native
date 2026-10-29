@@ -225,6 +225,12 @@ probe-present-hold:
 	@mkdir -p build/tests
 	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror -Ithird_party/d2r_gfx/gfx/nvn tests/present_hold/probe.c -o build/tests/present_hold_probe
 	build/tests/present_hold_probe
+.PHONY: probe-key-map
+probe-key-map:
+	@mkdir -p build/tests
+	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror -Iruntime tests/key_map/probe.c -o build/tests/key_map_probe
+	build/tests/key_map_probe
+
 .PHONY: probe-horse-coast
 probe-horse-coast:
 	@mkdir -p build/tests

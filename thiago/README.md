@@ -45,9 +45,26 @@ mouse liga na tecla 1, no painel de ajustes). O teclado está no código (`games
 
 - No mundo: E interage (A), Ctrl arremessa (R), Shift corre, botão direito do mouse puxa o arco e o esquerdo atira,
   botão do meio arremessa, esquerdo ataca e, com uma runa na mão, usa a runa (A).
+- Cavalo: soltar o W vai parando aos poucos, S freia; W com A/D faz curva mais fechada.
 - Nas cenas e diálogos: Espaço manda A e X juntos (continua e acelera o diálogo, pula a cena "Skip X"); Esc é o + (pula a cena "Skip +").
 - Nos menus: Enter e Espaço confirmam, Esc volta e fecha; E e Shift não fazem nada, exceto E, que vai para a próxima aba no
   inventário e no diário (Q volta). O mouse aponta e clica (esquerdo confirma, direito volta).
+
+### Trocar teclas e ícones
+
+`keys.txt` (modelo em `thiago/keys.txt`, vai para `~/Library/Application Support/MacNativeGames/BotW/keys.txt`) remapeia
+o teclado: `f = e` faz o F fazer tudo o que o E faz, em todo contexto; `e = none` desliga o E (`games/totk/runtime/key_map.h`).
+Linha errada: o log diz qual e o jogo usa as teclas padrão. Os ícones de botão do jogo mostram as teclas e o mouse
+(a fonte `External_00.bffnt` de `Font/Font_*.sbfarc`); depois de mudar `keys.txt` ou `controls.txt`, com o jogo fechado:
+
+```sh
+cd thiago/scripts && python3 key_icons.py --preview /tmp/icones.png && cd ../..
+python3 games/totk/scripts/make_mod_manifest.py "$HOME/Library/Application Support/MacNativeGames/BotW/mods/botw160" \
+  --app "/Applications/Breath of the Wild.app" --version botw160
+```
+
+Cada botão do Switch tem um ícone só: ele mostra a tecla do mundo (o A mostra E, mesmo nos menus, onde Enter e Espaço
+confirmam). Testes: `python3 -m unittest test_key_icons` em `thiago/scripts`.
 
 ## Armas inquebráveis
 

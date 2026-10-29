@@ -14,6 +14,7 @@
 #include "menu_pointer.h"
 #include "menu_grid.h"
 #include "space_skip.h"
+#include "key_map.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_mfx_mode.h"
 #include "../third_party/d2r_gfx/gfx/nvn/fps_overlay.h"
 static NSWindow *window;
@@ -140,23 +141,34 @@ static unsigned space_key(void){int r=space_role(!runtime_game_world_live||runti
  return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
 /* A window key after the settings panel: what it presses depends on where the game is (above). */
 static void front_key_down(unsigned short code,int repeat){
+ if(code==56&&in_menu())return;   /* Shift in a menu: nothing (only Esc goes back) */
  if(code==53){if(!repeat)escAs=esc_is_plus(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,pause_tabs_open())?53:56;runtime_input_key(escAs,1);return;}
  if(code==14){if(!repeat)eAs=pause_tabs_open()?59:in_menu()?KEY_NONE:14;runtime_input_key(eAs,1);return;}   /* E in the pause menu: the next tab (R, Control), as Q (L) the one before; A in the world */
  if(code==49){if(!repeat){spaceAs=space_key();fprintf(stderr,"[totk-input] Space: %s\n",spaceAs==KEY_SKIP?"A and X (cutscene, dialog)":spaceAs==38?"A (menu)":"X (world)");}if(spaceAs==KEY_SKIP){runtime_input_key(38,1);runtime_input_key(34,1);}else runtime_input_key(spaceAs,1);return;}   /* space_skip.h */
  if(code==36){if(!repeat)enterAs=runtime_game_world_live&&!runtime_game_world_live()?38:36;runtime_input_key(enterAs,1);return;}   /* Enter in a menu: A */
  runtime_input_key(code,1);}
 static void front_key_up(unsigned short code){if(code==53&&escAs){runtime_input_key(escAs,0);escAs=0;return;}if(code==36&&enterAs){runtime_input_key(enterAs,0);enterAs=0;return;}if(code==14&&eAs){runtime_input_key(eAs,0);eAs=0;return;}if(code==49&&spaceAs){if(spaceAs==KEY_SKIP){runtime_input_key(38,0);runtime_input_key(34,0);}else runtime_input_key(spaceAs,0);spaceAs=0;return;}runtime_input_key(code,0);}
+/* keys.txt next to controls.txt (TOTK_CONTROLS; key_map.h): read at the first key. A bad line is logged and the
+   default kept. */
+static unsigned key_remap(unsigned code){static uint8_t map[KEY_MAP_SIZE];static int loaded;
+ if(!loaded){loaded=1;key_map_default(map);const char *c=getenv("TOTK_CONTROLS"),*slash=c?strrchr(c,'/'):NULL;
+  if(slash){char path[4096],text[16384];snprintf(path,sizeof path,"%.*s/keys.txt",(int)(slash-c),c);FILE *f=fopen(path,"rb");
+   if(f){size_t n=fread(text,1,sizeof text-1,f);fclose(f);text[n]=0;const char *error=NULL;int line=key_map_parse(text,map,&error);
+    if(line)fprintf(stderr,"[totk-input] %s line %d: %s; the default keys are used\n",path,line,error);
+    else{int moved=0;for(int i=0;i<KEY_MAP_SIZE;i++)moved+=map[i]!=i;fprintf(stderr,"[totk-input] keys: %s (%d keys moved)\n",path,moved);}}}}
+ return code<KEY_MAP_SIZE?map[code]:code;}
+static void mapped_key(unsigned code,int down,int repeat){unsigned c=key_remap(code);if(c==KEY_MAP_NONE)return;if(down)front_key_down((unsigned short)c,repeat);else front_key_up((unsigned short)c);}
 /* input.txt "winkey <code> <ms>": a key as the window would get it, through front_key_down (runtime/input.c). */
 void runtime_front_key(unsigned code,unsigned ms){dispatch_async(dispatch_get_main_queue(),^{front_key_down((unsigned short)code,0);});
  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)ms*NSEC_PER_MSEC),dispatch_get_main_queue(),^{front_key_up((unsigned short)code);});}
--(void)keyDown:(NSEvent *)e{if(settingsOpen&&e.keyCode!=18){if(e.keyCode==53)settings_show(0);return;}front_key_down(e.keyCode,e.isARepeat);}
--(void)keyUp:(NSEvent *)e{front_key_up(e.keyCode);}
+-(void)keyDown:(NSEvent *)e{if(settingsOpen&&e.keyCode!=18){if(e.keyCode==53)settings_show(0);return;}mapped_key(e.keyCode,1,e.isARepeat);}
+-(void)keyUp:(NSEvent *)e{mapped_key(e.keyCode,0,0);}
 /* Caps Lock (ZL) pressed and released, read from the keyboards themselves: macOS's key events report only its lock state.
    Needs Input Monitoring (asked once); without it, flagsChanged falls back to the lock state. */
 static int capsHid;
 static void caps_hid_value(void *ctx,IOReturn r,void *sender,IOHIDValueRef v){(void)ctx;(void)r;(void)sender;
  IOHIDElementRef el=IOHIDValueGetElement(v);if(IOHIDElementGetUsagePage(el)!=kHIDPage_KeyboardOrKeypad||IOHIDElementGetUsage(el)!=kHIDUsage_KeyboardCapsLock)return;
- int down=IOHIDValueGetIntegerValue(v)!=0;if(!NSApp.isActive&&down)return;if(!settingsOpen||!down)runtime_input_key(57,down);}
+ int down=IOHIDValueGetIntegerValue(v)!=0;if(!NSApp.isActive&&down)return;if(!settingsOpen||!down)mapped_key(57,down,0);}
 static void caps_hid_start(void){
  if(IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)!=kIOHIDAccessTypeGranted&&!IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)){fprintf(stderr,"[totk-input] Caps Lock: no Input Monitoring permission, it works as a lock (ZL held while on)\n");return;}
  IOHIDManagerRef m=IOHIDManagerCreate(kCFAllocatorDefault,kIOHIDOptionsTypeNone);
@@ -165,11 +177,10 @@ static void caps_hid_start(void){
  IOHIDManagerScheduleWithRunLoop(m,CFRunLoopGetMain(),kCFRunLoopDefaultMode);
  if(IOHIDManagerOpen(m,kIOHIDOptionsTypeNone)!=kIOReturnSuccess){fprintf(stderr,"[totk-input] Caps Lock: keyboards not readable, it works as a lock\n");return;}
  capsHid=1;fprintf(stderr,"[totk-input] Caps Lock: held and released like any key (ZL)\n");}
--(void)flagsChanged:(NSEvent *)e{int shift=!!(e.modifierFlags&NSEventModifierFlagShift),option=!!(e.modifierFlags&NSEventModifierFlagOption),control=!!(e.modifierFlags&NSEventModifierFlagControl);
- if(e.keyCode==56&&(!settingsOpen||!shift)&&(!shift||!in_menu()))runtime_input_key(56,shift);if(e.keyCode==58&&(!settingsOpen||!option))runtime_input_key(58,option);
- if(e.keyCode==59&&(!settingsOpen||!control))runtime_input_key(59,control);
- /* Caps Lock (ZL): macOS reports only its lock state, so the shield stays up while the lock is on. */
- if(e.keyCode==57&&!capsHid){int caps=!!(e.modifierFlags&NSEventModifierFlagCapsLock);if(!settingsOpen||!caps)runtime_input_key(57,caps);}}
+/* Caps Lock (ZL): without capsHid macOS reports only its lock state, so the shield stays up while the lock is on. */
+-(void)flagsChanged:(NSEvent *)e{NSEventModifierFlags f=e.modifierFlags;unsigned k=e.keyCode;
+ int down=k==56?!!(f&NSEventModifierFlagShift):k==58?!!(f&NSEventModifierFlagOption):k==59?!!(f&NSEventModifierFlagControl):k==57&&!capsHid?!!(f&NSEventModifierFlagCapsLock):-1;
+ if(down>=0&&(!settingsOpen||!down))mapped_key(k,down,0);}
 /* The game has no mouse controls. In native full screen, keep the pointer out of the picture while idle, but show it again
    as soon as it moves; restore it when the window loses focus or leaves full screen. */
 void runtime_input_key_synthetic(unsigned code,int down);

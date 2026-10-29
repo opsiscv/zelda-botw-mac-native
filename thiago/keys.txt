@@ -1,0 +1,8 @@
+# Teclado: "tecla = tecla padrão" faz a tecla fazer o que a padrão faz (em todo contexto); "tecla = none" desliga.
+# Copie para ~/Library/Application Support/MacNativeGames/BotW/keys.txt e rode thiago/scripts/key_icons.py (ícones).
+# Nomes: letras, dígitos, space enter esc tab shift ctrl option caps backspace up down left right
+# Padrão: E interage (A), Shift corre/volta (B), Space pula (X), Q/Ctrl (L/R), Caps mira (ZL), Esc (+), Tab mapa (-),
+#         WASD anda, setas câmera, F G B V direcional, Z/C clique dos analógicos, J K I U = A B X Y.
+# Exemplo: interagir no F
+# f = e
+# e = none
