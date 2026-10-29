@@ -1,0 +1,9 @@
+# Controles para a versão oficial (main) do MacNativeGames.
+# Esta versão NÃO aceita teclas (key_...) nem sensibilidade aqui: o teclado é fixo.
+# Modo mouse: tecla 1 abre o painel de ajustes; ligue a opção de mouse lá.
+# Botões do mouse: mouse_left mouse_right mouse_middle mouse4 mouse5
+mouse_left = y
+mouse_right = zr aim mouse_left
+mouse5 = x
+mouse4 = b
+mouse_middle = r

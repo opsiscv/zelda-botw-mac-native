@@ -29,6 +29,7 @@
 #include "nvn_diag_range.h"
 #include "../../host/front.h"
 #include "nvn_dirty.h"
+#include "present_hold.h"
 #include "totk_vpool.h"
 #include "totk_lifelog.h"
 #include <mach/mach_time.h>
@@ -2928,6 +2929,10 @@ int (*g_nvn_loadscreen_up)(void);   // 宿主登记：读取画面此刻是否�
 // replay frame number, which the synchronous path sets at the end of nvnQueuePresentTexture.
 static void present_exec(win_t *o, int idx, double period, const int crop[4], uint64_t frame) {
     gfx_enter();
+    { static uint64_t last, prev; static int shown = -1; uint64_t ps, dr; mtl_stats(&ps, &dr);   // present_hold.h
+      uint64_t d = dr >= last ? dr - last : 0; last = dr;
+      if (present_hold(prev, d) && shown >= 0 && shown < o->ntex && shown != idx) idx = shown; else shown = idx;
+      prev = d; }
     { void mtl_shot_at_present(const tex_t *t); if (idx >= 0 && idx < o->ntex && idx < 4) mtl_shot_at_present(CTX(o->tex[idx])); }
     if (idx >= 0 && idx < o->ntex && idx < 4) o->ticket[idx] = mtl_present(CTX(o->tex[idx]), period, (int *)crop);   // 只入队，立即返回 | enqueue only, return immediately
     if (frame) mtl_set_frame(frame);

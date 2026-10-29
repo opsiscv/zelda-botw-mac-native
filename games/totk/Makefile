@@ -219,6 +219,12 @@ probe-fps-overlay:
 	@mkdir -p build/tests
 	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror -Ithird_party/d2r_gfx/gfx/nvn tests/fps_overlay/probe.c third_party/d2r_gfx/gfx/nvn/fps_overlay.c third_party/d2r_gfx/gfx/nvn/totk_sysload.c -framework IOKit -framework CoreFoundation -framework CoreGraphics -framework CoreText -o build/tests/fps_overlay_probe
 	build/tests/fps_overlay_probe
+# First paused frame: the previous picture is shown instead of the black world (present_hold.h).
+.PHONY: probe-present-hold
+probe-present-hold:
+	@mkdir -p build/tests
+	xcrun clang -std=c11 -O1 -g -Wall -Wextra -Werror -Ithird_party/d2r_gfx/gfx/nvn tests/present_hold/probe.c -o build/tests/present_hold_probe
+	build/tests/present_hold_probe
 .PHONY: probe-audio
 probe-audio: runtime
 	build/totk-native rewritten/v0 probe-audio > analysis/native-audio-probe.json

@@ -3,12 +3,16 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <CoreVideo/CoreVideo.h>
+#import <IOKit/hid/IOHIDManager.h>
+#import <IOKit/hidsystem/IOHIDLib.h>
 #include <stdatomic.h>
 #include <math.h>
 #include "runtime.h"
 #include "game_version.h"
 #include "totk_ui_lang.h"
 #include "gamepad_layout.h"
+#include "menu_pointer.h"
+#include "menu_grid.h"
 #include "../third_party/d2r_gfx/gfx/nvn/totk_mfx_mode.h"
 #include "../third_party/d2r_gfx/gfx/nvn/fps_overlay.h"
 static NSWindow *window;
@@ -119,30 +123,81 @@ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,cons
 -(BOOL)acceptsFirstResponder{return YES;}
 /* While the settings panel is open only key 1 (it closes the panel, runtime/input.c) and Esc (closes it here, not the game's
    menu) do anything; releases still go through so nothing stays held. */
--(void)keyDown:(NSEvent *)e{if(settingsOpen&&e.keyCode!=18){if(e.keyCode==53)settings_show(0);return;}runtime_input_key(e.keyCode,1);}
--(void)keyUp:(NSEvent *)e{runtime_input_key(e.keyCode,0);}
--(void)flagsChanged:(NSEvent *)e{int shift=!!(e.modifierFlags&NSEventModifierFlagShift),option=!!(e.modifierFlags&NSEventModifierFlagOption);
- if(e.keyCode==56&&(!settingsOpen||!shift))runtime_input_key(56,shift);if(e.keyCode==58&&(!settingsOpen||!option))runtime_input_key(58,option);}
+/* Esc in a menu (the world stopped) is B, back, and Enter and Space are A; in the world they stay what they map to. In a
+   menu E and Shift do nothing (user 2026-10-29: only Enter and Space confirm, only Esc goes back), E being the next tab
+   in the inventory and the Adventure Log. Kept per press. */
+extern int runtime_game_world_live(void) __attribute__((weak));
+extern int runtime_inventory_slots(MenuSlot *,int,int *) __attribute__((weak));
+extern int runtime_quest_log_live(void) __attribute__((weak));
+/* The pause menu's inventory or Adventure Log is open (the System tab has no sign here: from it Q goes back). */
+static int pause_tabs_open(void){if(runtime_game_world_live&&runtime_game_world_live())return 0;if(runtime_quest_log_live&&runtime_quest_log_live())return 1;MenuSlot slots[MENU_SLOTS_MAX];int sel;return runtime_inventory_slots&&runtime_inventory_slots(slots,MENU_SLOTS_MAX,&sel)>0;}
+static unsigned escAs,enterAs,eAs,spaceAs;
+static int in_menu(void){return runtime_game_world_live&&!runtime_game_world_live();}
+enum{KEY_NONE=255};   /* runtime_input_key ignores it */
+-(void)keyDown:(NSEvent *)e{if(settingsOpen&&e.keyCode!=18){if(e.keyCode==53)settings_show(0);return;}
+ if(e.keyCode==53){if(!e.isARepeat)escAs=runtime_game_world_live&&!runtime_game_world_live()?56:53;runtime_input_key(escAs,1);return;}
+ if(e.keyCode==14){if(!e.isARepeat)eAs=pause_tabs_open()?59:in_menu()?KEY_NONE:14;runtime_input_key(eAs,1);return;}   /* E in the pause menu: the next tab (R, Control), as Q (L) the one before; A in the world */
+ if(e.keyCode==49){if(!e.isARepeat)spaceAs=in_menu()?38:49;runtime_input_key(spaceAs,1);return;}
+ if(e.keyCode==36){if(!e.isARepeat)enterAs=runtime_game_world_live&&!runtime_game_world_live()?38:36;runtime_input_key(enterAs,1);return;}   /* Enter in a menu: A */
+ runtime_input_key(e.keyCode,1);}
+-(void)keyUp:(NSEvent *)e{if(e.keyCode==53&&escAs){runtime_input_key(escAs,0);escAs=0;return;}if(e.keyCode==36&&enterAs){runtime_input_key(enterAs,0);enterAs=0;return;}if(e.keyCode==14&&eAs){runtime_input_key(eAs,0);eAs=0;return;}if(e.keyCode==49&&spaceAs){runtime_input_key(spaceAs,0);spaceAs=0;return;}runtime_input_key(e.keyCode,0);}
+/* Caps Lock (ZL) pressed and released, read from the keyboards themselves: macOS's key events report only its lock state.
+   Needs Input Monitoring (asked once); without it, flagsChanged falls back to the lock state. */
+static int capsHid;
+static void caps_hid_value(void *ctx,IOReturn r,void *sender,IOHIDValueRef v){(void)ctx;(void)r;(void)sender;
+ IOHIDElementRef el=IOHIDValueGetElement(v);if(IOHIDElementGetUsagePage(el)!=kHIDPage_KeyboardOrKeypad||IOHIDElementGetUsage(el)!=kHIDUsage_KeyboardCapsLock)return;
+ int down=IOHIDValueGetIntegerValue(v)!=0;if(!NSApp.isActive&&down)return;if(!settingsOpen||!down)runtime_input_key(57,down);}
+static void caps_hid_start(void){
+ if(IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)!=kIOHIDAccessTypeGranted&&!IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)){fprintf(stderr,"[totk-input] Caps Lock: no Input Monitoring permission, it works as a lock (ZL held while on)\n");return;}
+ IOHIDManagerRef m=IOHIDManagerCreate(kCFAllocatorDefault,kIOHIDOptionsTypeNone);
+ IOHIDManagerSetDeviceMatching(m,(__bridge CFDictionaryRef)@{@kIOHIDDeviceUsagePageKey:@(kHIDPage_GenericDesktop),@kIOHIDDeviceUsageKey:@(kHIDUsage_GD_Keyboard)});
+ IOHIDManagerRegisterInputValueCallback(m,caps_hid_value,NULL);
+ IOHIDManagerScheduleWithRunLoop(m,CFRunLoopGetMain(),kCFRunLoopDefaultMode);
+ if(IOHIDManagerOpen(m,kIOHIDOptionsTypeNone)!=kIOReturnSuccess){fprintf(stderr,"[totk-input] Caps Lock: keyboards not readable, it works as a lock\n");return;}
+ capsHid=1;fprintf(stderr,"[totk-input] Caps Lock: held and released like any key (ZL)\n");}
+-(void)flagsChanged:(NSEvent *)e{int shift=!!(e.modifierFlags&NSEventModifierFlagShift),option=!!(e.modifierFlags&NSEventModifierFlagOption),control=!!(e.modifierFlags&NSEventModifierFlagControl);
+ if(e.keyCode==56&&(!settingsOpen||!shift)&&(!shift||!in_menu()))runtime_input_key(56,shift);if(e.keyCode==58&&(!settingsOpen||!option))runtime_input_key(58,option);
+ if(e.keyCode==59&&(!settingsOpen||!control))runtime_input_key(59,control);
+ /* Caps Lock (ZL): macOS reports only its lock state, so the shield stays up while the lock is on. */
+ if(e.keyCode==57&&!capsHid){int caps=!!(e.modifierFlags&NSEventModifierFlagCapsLock);if(!settingsOpen||!caps)runtime_input_key(57,caps);}}
 /* The game has no mouse controls. In native full screen, keep the pointer out of the picture while idle, but show it again
    as soon as it moves; restore it when the window loses focus or leaves full screen. */
+void runtime_input_key_synthetic(unsigned code,int down);
+static int titleMode,titleFrame,titleTarget=-1,titleConfirm,titleScroll,titleFollow;   /* titleScroll: wheel steps to make (+ down); titleFollow: the pointer moved, follow it */
+static unsigned titleKey;static NSCursor *titleCursor;   /* titleFrame: a menu with the selection frame */
+static CGPoint pointerSaved;static int pointerHasSaved;   /* where the menu pointer was, given back the next time a menu takes the mouse */
+-(void)resetCursorRects{if(titleMode&&titleCursor)[self addCursorRect:self.bounds cursor:titleCursor];else [super resetCursorRects];}   /* the title menu's pointer, kept by AppKit */
 -(void)hideCursorIfIdle:(NSTimer *)timer{
- (void)timer;self.cursorHideTimer=nil;
+ (void)timer;self.cursorHideTimer=nil;if(titleMode)return;
  if(!self.cursorAutoHideActive||!self.window.isKeyWindow||!(self.window.styleMask&NSWindowStyleMaskFullScreen))return;
  if(!self.cursorIsHidden){[NSCursor hide];self.cursorIsHidden=YES;}
 }
+/* The title menu with the mouse (menu_pointer.h): mouse mode lets the pointer go there, the item under it is walked to
+   with the d-pad (title_tick) and a click confirms it (A). */
+extern int runtime_title_count(void) __attribute__((weak));
+static int title_count(void){return runtime_title_count?runtime_title_count():5;}
+static int title_item_at(NSView *v,NSEvent *e){NSPoint p=[v convertPoint:e.locationInWindow fromView:nil];NSSize s=v.bounds.size;return menu_title_item(s.width,s.height,p.x,p.y,title_count());}
 -(void)mouseMoved:(NSEvent *)e{
  if(mouseHeld){runtime_mouse_move(e.deltaX,e.deltaY);return;}
+ if(titleMode){titleFollow=2;NSPoint m=NSEvent.mouseLocation;pointerSaved=CGPointMake(m.x,NSMaxY(NSScreen.screens.firstObject.frame)-m.y);pointerHasSaved=1;
+  [self.cursorHideTimer invalidate];self.cursorHideTimer=nil;if(self.cursorIsHidden){[NSCursor unhide];self.cursorIsHidden=NO;}
+  int i=title_item_at(self,e);if(i>=0)titleTarget=i;if(titleCursor)[titleCursor set];return;}
  if(!self.cursorAutoHideActive)return;
  [self.cursorHideTimer invalidate];self.cursorHideTimer=nil;
  if(self.cursorIsHidden){[NSCursor unhide];self.cursorIsHidden=NO;}
  self.cursorHideTimer=[NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(hideCursorIfIdle:) userInfo:nil repeats:NO];
 }
+-(void)scrollWheel:(NSEvent *)e{   /* by notches (menu_wheel): a notch of the wheel is one step */
+ static MenuWheel wheel;if(e.momentumPhase!=NSEventPhaseNone)return;
+ int steps=menu_wheel(&wheel,e.timestamp,e.deltaY);if(!steps)return;
+ if(titleMode&&!mouseHeld){titleScroll+=steps;titleFollow=0;return;}
+ if(mouseHeld){extern void runtime_mouse_wheel(int);runtime_mouse_wheel(steps);}}
 -(void)mouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
 -(void)rightMouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
 -(void)otherMouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
--(void)mouseDown:(NSEvent *)e{(void)e;if(mouseHeld)runtime_mouse_button(0,1);}
+-(void)mouseDown:(NSEvent *)e{if(titleMode&&!mouseHeld){int i=titleFrame?-1:title_item_at(self,e);if(titleFrame||i>=0){titleTarget=i;titleConfirm=1;titleFollow=1;}return;}if(mouseHeld)runtime_mouse_button(0,1);}
 -(void)mouseUp:(NSEvent *)e{(void)e;runtime_mouse_button(0,0);}
--(void)rightMouseDown:(NSEvent *)e{(void)e;if(mouseHeld)runtime_mouse_button(1,1);}   /* no context menu */
+-(void)rightMouseDown:(NSEvent *)e{(void)e;if(titleMode&&!mouseHeld){if(!titleKey){titleKey=56;runtime_input_key_synthetic(56,1);}return;}if(mouseHeld)runtime_mouse_button(1,1);}   /* menus: B */   /* no context menu */
 -(void)rightMouseUp:(NSEvent *)e{(void)e;runtime_mouse_button(1,0);}
 -(void)otherMouseDown:(NSEvent *)e{if(mouseHeld)runtime_mouse_button((int)e.buttonNumber,1);}   /* 2 middle, 3 and 4 the side buttons */
 -(void)otherMouseUp:(NSEvent *)e{runtime_mouse_button((int)e.buttonNumber,0);}
@@ -158,8 +213,92 @@ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,cons
  }
 }
 @end
+extern int runtime_title_cursor(void) __attribute__((weak));
+extern int runtime_menu_frame(float r[4]) __attribute__((weak));
+void runtime_title_target(int i){dispatch_async(dispatch_get_main_queue(),^{titleTarget=i;});}   /* tests: "titlego <item>" */
+static NSPoint fakePointer;static int fakePointerOn;   /* tests: "pointer <x> <y>" (view points, y up) stands for the mouse */
+static NSPoint title_pointer(NSView *v){return fakePointerOn?fakePointer:[v convertPoint:v.window.mouseLocationOutsideOfEventStream fromView:nil];}
+void runtime_menu_pointer(double lx,double ly){dispatch_async(dispatch_get_main_queue(),^{   /* layout units (1280x720, centre 0,0) */
+ NSSize z=window.contentView.bounds.size;double s=fmin(z.width/1280,z.height/720);
+ fakePointer=NSMakePoint((z.width-1280*s)/2+(lx+640)*s,(z.height-720*s)/2+(ly+360)*s);fakePointerOn=1;titleFollow=2;});}
+void runtime_menu_wheel(int n){dispatch_async(dispatch_get_main_queue(),^{titleScroll+=n;titleFollow=0;});}   /* tests: "wheel <notches>" */
+static void title_tick(void){   /* main thread, every 8 ms: one d-pad step toward the item under the mouse, the next as soon as the game moved */
+ static int waitFrom=-1;static uint64_t waitUntil;
+ if(titleKey){runtime_input_key_synthetic(titleKey,0);titleKey=0;return;}   /* the press stays pending until the game reads it */
+ int on=runtime_mouse_enabled()&&!settingsOpen;float fr[4];
+extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) shows the same frame: not a pointer menu */
+ int cur=on&&runtime_title_cursor?runtime_title_cursor():-1,frame=cur<0&&on&&!runtime_input_dpad_held()&&runtime_menu_frame&&runtime_menu_frame(fr),mode=cur>=0||frame;
+ titleFrame=frame;
+ {static uint64_t offAt;uint64_t t=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);   /* a page turning or an animation hides the frame a moment: */
+  int world=runtime_game_world_live&&runtime_game_world_live();                 /* the pointer mode holds through it, so the pointer is not */
+  if(mode||world)offAt=0;                                                        /* taken and given back (put back where it was) every time */
+  else if(titleMode){if(!offAt)offAt=t;if(t-offAt<500000000ull)return;}}
+ if(mode!=titleMode){titleMode=mode;titleTarget=-1;titleConfirm=0;front_mouse_update();
+  if(mode){if(!titleCursor){char path[4096];extern int runtime_setting_path(const char *,char *,size_t);NSImage *im=runtime_setting_path("cursor.png",path,sizeof path)?[[NSImage alloc] initWithContentsOfFile:@(path)]:nil;
+    if(im){im.size=NSMakeSize(24,24*im.size.height/fmax(1,im.size.width));titleCursor=[[NSCursor alloc] initWithImage:im hotSpot:NSMakePoint(1,1)];}else titleCursor=NSCursor.arrowCursor;}
+   [titleCursor set];window.acceptsMouseMovedEvents=YES;}   /* the hover needs moves in a window too */
+  [window invalidateCursorRectsForView:window.contentView];
+  fprintf(stderr,"[totk] menu pointer: %s\n",mode?(frame?"a menu with the selection frame":"the title menu"):"off");}
+ if(!mode){titleScroll=0;return;}
+ {static NSPoint last;NSPoint m=NSEvent.mouseLocation;   /* the pointer read here too: moves are not always delivered after a screen change */
+  if(m.x!=last.x||m.y!=last.y){last=m;titleFollow=2;
+   if(!frame){NSView *v=window.contentView;NSPoint p=title_pointer(v);
+    int i=menu_title_item(v.bounds.size.width,v.bounds.size.height,p.x,p.y,title_count());if(i>=0)titleTarget=i;}}}
+ if(frame){   /* a frame menu */
+  uint64_t now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  extern int runtime_quest_log_live(void) __attribute__((weak));
+  extern int runtime_quest_tab(void) __attribute__((weak));
+  {static unsigned key;static uint64_t until;static int from;   /* the Adventure Log: a wheel notch turns one tab, a right-stick flick held */
+   int tab=runtime_quest_tab?runtime_quest_tab():-1;                /* until the game has turned it (its tab changed), then the next at once */
+   if(key&&(tab!=from||now>=until)){runtime_input_key_synthetic(key,0);key=0;fprintf(stderr,"[qtab] %.3f tab %d (%s)\n",now/1e9,tab,tab!=from?"turned":"timeout");}
+   if(runtime_quest_log_live&&runtime_quest_log_live()){
+    if(titleScroll>2)titleScroll=2;if(titleScroll<-2)titleScroll=-2;   /* no notches left over to run on after the wheel stops */
+    if(titleScroll&&!key){key=titleScroll>0?124:123;titleScroll+=titleScroll>0?-1:1;from=tab;runtime_input_key_synthetic(key,1);until=now+200000000ull;fprintf(stderr,"[qtab] %.3f press %u from %d\n",now/1e9,key,tab);}
+    titleFollow=titleFollow==2?1:titleFollow;if(titleScroll||key)return;}}
+  if(menu_frame_small(fr)){   /* the inventory (menu_grid.h): the item slot under the mouse, by the game's own map of the page */
+   extern int runtime_inventory_slots(MenuSlot *,int,int *) __attribute__((weak));
+   static MenuSlot slots[MENU_SLOTS_MAX];static int waiting;static uint64_t until;static int fromSel=-1;
+   int sel=-1,n=runtime_inventory_slots?runtime_inventory_slots(slots,MENU_SLOTS_MAX,&sel):0;
+   NSView *v=window.contentView;NSPoint p=title_pointer(v);double w=v.bounds.size.width,h=v.bounds.size.height,sc=fmin(w/1280,h/720);
+   double lx=(p.x-(w-1280*sc)/2)/sc-640,ly=(p.y-(h-720*sc)/2)/sc-360;
+   if(waiting){if(sel==fromSel&&now<until)return;waiting=0;}   /* the last step not taken yet */
+   extern void runtime_inventory_page(int);
+   if(titleScroll){runtime_inventory_page(titleScroll);titleScroll=0;titleFollow=1;return;}   /* the wheel: a page per notch, the game's own page turn */
+   int target=n?menu_slot_at(slots,n,lx,ly):-1;
+   if(titleConfirm&&target<0&&n&&(lx<MENU_GRID_PAGE_LEFT_X||lx>MENU_GRID_PAGE_RIGHT_X)&&fabs(ly)<260){titleConfirm=0;runtime_inventory_page(lx<MENU_GRID_PAGE_LEFT_X?-1:1);titleFollow=1;return;}   /* a click on a page arrow */
+   if(titleFollow==2)titleFollow=1;
+   if(target<0||sel<0){if(titleConfirm&&target<0)titleConfirm=0;return;}   /* nothing under the mouse: nothing at all */
+   if(target==sel){titleFollow=0;if(titleConfirm){titleConfirm=0;titleKey=38;runtime_input_key_synthetic(38,1);}return;}   /* there: a click is A */
+   if(!titleFollow&&!titleConfirm)return;   /* the mouse did not move since (the keyboard may be in use) */
+   int path[32],k=menu_slot_path(slots,n,sel,target,path,32);
+   if(k<=0)return;
+   static const unsigned dpad[5]={0,5,9,3,11};titleKey=dpad[path[0]];runtime_input_key_synthetic(titleKey,1);   /* one step, the rest once it is taken */
+   fromSel=sel;waiting=1;until=now+150000000ull;
+   return;}
+  /* a list (saves, Start / Cancel, options): one row at a time toward the pointer, the next as soon as the frame moved */
+  static float last[4];static int waiting;static uint64_t until;
+  if(waiting){int same=fr[0]==last[0]&&fr[1]==last[1]&&fr[2]==last[2]&&fr[3]==last[3];if(same&&now<until)return;waiting=0;}
+  if(titleFollow==2)titleFollow=1;
+  int step=0;
+  if(titleScroll){step=titleScroll>0?MENU_DOWN:MENU_UP;titleScroll+=titleScroll>0?-1:1;}   /* a row per notch */
+  else{NSView *v=window.contentView;NSPoint p=title_pointer(v);int inside=0;
+   step=titleFollow?menu_frame_step(v.bounds.size.width,v.bounds.size.height,p.x,p.y,fr,&inside):0;
+   if(!step&&titleConfirm){titleConfirm=0;if(inside){titleKey=38;runtime_input_key_synthetic(38,1);}return;}}   /* a click: A once in the frame */
+  if(step){titleKey=step==MENU_UP?5:9;runtime_input_key_synthetic(titleKey,1);   /* G up, V down */
+   memcpy(last,fr,sizeof last);waiting=1;until=now+150000000ull;titleTarget=-1;}
+  return;
+ }
+ if(titleScroll){static uint64_t scrollUntil;static int scrollFrom=-1;   /* the title: a row per notch, the next once the game moved */
+  if(scrollFrom>=0&&cur==scrollFrom&&clock_gettime_nsec_np(CLOCK_UPTIME_RAW)<scrollUntil)return;
+  titleKey=titleScroll>0?9:5;titleScroll+=titleScroll>0?-1:1;runtime_input_key_synthetic(titleKey,1);
+  scrollFrom=cur;scrollUntil=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+150000000ull;titleTarget=-1;return;}
+ if(waitFrom>=0){if(cur==waitFrom&&clock_gettime_nsec_np(CLOCK_UPTIME_RAW)<waitUntil)return;waitFrom=-1;}   /* the last step not shown yet */
+ if(titleFollow&&titleTarget>=0&&titleTarget!=cur){titleKey=titleTarget>cur?9:5;runtime_input_key_synthetic(titleKey,1);   /* V: d-pad down, G: up */
+  waitFrom=cur;waitUntil=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+150000000ull;}
+ else if(titleConfirm&&titleTarget==cur){titleConfirm=0;titleKey=38;runtime_input_key_synthetic(38,1);}   /* J: A */
+}
 static void front_mouse_update(void){   /* main thread; also runtime/gamepad.m's hook when mouse mode changes */
- BOOL want=window&&runtime_mouse_enabled()&&window.isKeyWindow&&!textEntryOpen&&!settingsOpen;
+ BOOL want=window&&runtime_mouse_enabled()&&window.isKeyWindow&&!textEntryOpen&&!settingsOpen&&!titleMode;
  if(want==mouseHeld)return;
  mouseHeld=want;
  if(want){
@@ -167,7 +306,7 @@ static void front_mouse_update(void){   /* main thread; also runtime/gamepad.m's
   CGWarpMouseCursorPosition(CGPointMake(NSMidX(f),top-NSMidY(f)));   /* clicks land in the window */
   CGAssociateMouseAndMouseCursorPosition(false);[NSCursor hide];window.acceptsMouseMovedEvents=YES;
  }else{
-  CGAssociateMouseAndMouseCursorPosition(true);[NSCursor unhide];runtime_mouse_release();
+  CGAssociateMouseAndMouseCursorPosition(true);if(titleMode&&pointerHasSaved)CGWarpMouseCursorPosition(pointerSaved);[NSCursor unhide];runtime_mouse_release();
   window.acceptsMouseMovedEvents=((TOTKInputView *)window.contentView).cursorAutoHideActive;
  }
  fprintf(stderr,"[totk] mouse %s\n",want?"held by the window (the settings panel, key 1, or Command-Tab lets it go)":"let go");
@@ -357,7 +496,8 @@ void runtime_front_run(void(*callback)(void)){
   bootProgress.minValue=0;bootProgress.maxValue=100;bootProgress.indeterminate=YES;bootProgress.autoresizingMask=NSViewMinXMargin|NSViewMaxXMargin|NSViewMinYMargin|NSViewMaxYMargin;
   [bootOverlay addSubview:bootStage];[bootOverlay addSubview:bootDetail];[bootOverlay addSubview:bootProgress];
   [window.contentView addSubview:bootOverlay];[bootProgress startAnimation:nil];
-  front_menubar_fps();
+  front_menubar_fps();caps_hid_start();
+  [NSTimer scheduledTimerWithTimeInterval:0.008 repeats:YES block:^(NSTimer *t){(void)t;title_tick();}];
   /* The FPS, shader and load lines: in the corner box (compact HUD), or with TOTK_HUD=corners drawn into the game picture's
      corners by the present encoder (gfx/nvn/fps_overlay.c). The box sits under the opaque boot overlay until it is hidden. */
   if(hud_compact()){TOTKHudBox *box=[[TOTKHudBox alloc] initWithFrame:NSZeroRect];box.autoresizingMask=NSViewMinXMargin|NSViewMinYMargin;

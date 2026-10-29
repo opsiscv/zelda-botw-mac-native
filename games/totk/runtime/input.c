@@ -14,8 +14,13 @@ static pthread_mutex_t inputLock=PTHREAD_MUTEX_INITIALIZER;
 static unsigned char keys[128];static uint64_t pending;
 static uint32_t styles=1;static bool enabled,allowed=true;static int holdType;
 static int64_t sample;static uint64_t padSeen;
-/* F/T/H/G map the D-pad left/up/right/down, keeping both analog-stick mappings independent. */
-static uint64_t button(unsigned code){switch(code){case 38:return 1;case 40:case 49:return 2;case 34:return 4;case 32:return 8;case 6:return 16;case 8:return 32;case 12:return 64;case 14:return 128;case 58:return 256;case 56:return 512;case 36:return 1024;case 48:case 53:return 2048;case 3:return 4096;case 17:return 8192;case 4:return 16384;case 5:return 32768;default:return 0;}}
+/* F/G/B/V map the D-pad left/up/right/down, keeping both analog-stick mappings independent. E interacts (A), Control
+   throws (R); the bow is drawn with the right mouse button (user 2026-10-29). */
+static uint64_t button(unsigned code){switch(code){case 38:case 14:return 1;case 40:case 56:return 2;case 34:case 49:return 4;case 32:return 8;case 6:return 16;case 8:return 32;case 12:return 64;case 59:return 128;case 57:return 256;case 36:case 53:return 1024;case 48:return 2048;case 3:return 4096;case 5:return 8192;case 11:return 16384;case 9:return 32768;default:return 0;}}
+/* ZL held on the keyboard or a controller (the mouse camera hands sideways turns to the stick then: gamepad.m). */
+int runtime_input_zl_held(void){for(unsigned i=0;i<128;i++)if(keys[i]&&(button(i)&256))return 1;RuntimeGamepadState pad;runtime_gamepad_read(&pad);return (pad.buttons&256)!=0;}
+/* A d-pad direction held (a quick-select bar open: weapons, bows, shields, runes; the mouse wheel then walks it). */
+int runtime_input_dpad_held(void){for(unsigned i=0;i<128;i++)if(keys[i]&&(button(i)&0xf000))return 1;RuntimeGamepadState pad;runtime_gamepad_read(&pad);return (pad.buttons&0xf000)!=0;}
 /* Real user input (a window key, a controller button, a stick pushed past half) stops TOTK_AUTOLOAD and is logged at most
    once a minute. In an agent's test session (TOTK_SLOT_OWNER other than user) the line says the user is playing it: its
    save is a copy, its scripted measurement is void, and its script must not close the game under the user
@@ -54,6 +59,22 @@ static uint32_t style(const uint32_t *id){if(!id)runtime_fail("controller id poi
 static int pad_states(NpadState *out,int max,const uint32_t *id,uint32_t want_style);
 static int full_states(NpadState *out,int max,const uint32_t *id){return pad_states(out,max,id,1);}
 static int handheld_states(NpadState *out,int max,const uint32_t *id){return pad_states(out,max,id,2);}
+/* Riding with the keyboard (mouse mode): a change of the movement keys lets the stick back to the centre a moment first.
+   A horse at a stand only starts on a stick pushed out of the centre; D then W, keys, go round the rim without it. */
+#define HORSE_RECENTRE_NS 50000000ull
+static void horse_recentre(NpadState *state){
+ extern int runtime_horse_state(float *,float *) __attribute__((weak));static unsigned last;static uint64_t until;float yaw,speed;
+ unsigned now=keys[13]|keys[1]<<1|keys[0]<<2|keys[2]<<3;uint64_t t=runtime_now_ns();
+ if(now!=last){last=now;until=now&&runtime_horse_state&&runtime_mouse_enabled()&&runtime_horse_state(&yaw,&speed)?t+HORSE_RECENTRE_NS:0;}
+ if(t<until)state->lx=state->ly=0;}
+/* Riding with the keyboard (mouse mode): with no key held the horse is reined in while it goes forward (the game keeps
+   its gait); not below that speed: held back at a stand it would back up or turn round. */
+#define HORSE_STOP_SPEED 0.8f   /* units per second forward, smoothed */
+static void horse_brake(NpadState *state){
+ extern int runtime_horse_state(float *,float *) __attribute__((weak));float yaw,speed;
+ if(!state->lx&&!state->ly&&runtime_horse_state&&runtime_mouse_enabled()&&runtime_horse_state(&yaw,&speed)&&speed>HORSE_STOP_SPEED)state->ly=-32767;}
+int runtime_horse_keys(void){return keys[13]|keys[1]<<1|keys[0]<<2|keys[2]<<3;}   /* W S A D, for the horse's own step (game_patches_botw.c) */
+static int forcedStick;static int32_t forcedLx,forcedLy;   /* diagnostic "stick <lx> <ly>" / "stick off": the left stick as given */
 static int pad_states(NpadState *out,int max,const uint32_t *id,uint32_t want_style){if(max<=0)return 0;if(id)input_log(want_style==2?"handheld state":"full-key state",*id);if(!out||!id)runtime_fail("controller output pointer");pthread_mutex_lock(&inputLock);NpadState state={.sampling=++sample};if(enabled&&allowed&&*id==pad_id()&&want_style==pad_style()&&(styles&want_style)){
  state.attributes=1;for(unsigned i=0;i<128;i++)if(keys[i])state.buttons|=button(i);state.buttons|=pending;pending=0;
  state.lx=32767*((int)keys[2]-(int)keys[0]);state.ly=32767*((int)keys[13]-(int)keys[1]);state.rx=32767*((int)keys[124]-(int)keys[123]);state.ry=32767*((int)keys[126]-(int)keys[125]);
@@ -61,6 +82,7 @@ static int pad_states(NpadState *out,int max,const uint32_t *id,uint32_t want_st
  if(pad.buttons&~padSeen||abs(pad.lx)>16384||abs(pad.ly)>16384||abs(pad.rx)>16384||abs(pad.ry)>16384)user_input("controller");padSeen=pad.buttons;
  if(abs(pad.lx)>abs(state.lx))state.lx=pad.lx;if(abs(pad.ly)>abs(state.ly))state.ly=pad.ly;
  if(abs(pad.rx)>abs(state.rx))state.rx=pad.rx;if(abs(pad.ry)>abs(state.ry))state.ry=pad.ry;
+ if(forcedStick){state.lx=forcedLx;state.ly=forcedLy;}else{horse_recentre(&state);if(!(keys[13]|keys[1]|keys[0]|keys[2]))horse_brake(&state);}
  }*out=state;pthread_mutex_unlock(&inputLock);return 1;}
 static int disconnected_states(NpadState *out,int max,const uint32_t *id){if(id)input_log("joy-con state",*id);if(max<=0)return 0;if(!out)runtime_fail("controller output pointer");pthread_mutex_lock(&inputLock);*out=(NpadState){.sampling=++sample};pthread_mutex_unlock(&inputLock);return 1;}
 static void hold_type(int type){if(type<0||type>1)runtime_fail("invalid joy hold type");holdType=type;(void)holdType;}
@@ -162,6 +184,8 @@ static void *input_file(void *arg) {
         } else if (sscanf(line, "key %u %u %n", &code, &ms, &used) == 2 && used && !line[used] && code < 128 && ms > 0 && ms <= 5000) {
             fprintf(stderr, "[totk-input] file: key %u for %u ms\n", code, ms);
             runtime_input_key_synthetic(code, 1); usleep(ms * 1000); runtime_input_key_synthetic(code, 0);
+        } else if (sscanf(line, "hold %u %n", &code, &used) == 1 && used && !line[used] && code < 128) { runtime_input_key_synthetic(code, 1);   /* "hold <code>" ... "release <code>" */
+        } else if (sscanf(line, "release %u %n", &code, &used) == 1 && used && !line[used] && code < 128) { runtime_input_key_synthetic(code, 0);
         } else if (sscanf(line, "passdump %u %n", &code, &used) == 1 && used && !line[used] && code > 0 && code < 16) {
             extern void dm_gfx_passdump_next(long n); dm_gfx_passdump_next((long)code);
         } else if (!strncmp(line, "anomdump", 8) && (line[8] == '\n' || line[8] == '\r' || !line[8])) {   /* TOTK_ANOMALY=<dir>: write the per-draw records (with GPU sample counts) of the last frames now */
@@ -188,6 +212,52 @@ static void *input_file(void *arg) {
             line[strcspn(line, "\r\n")] = 0; if (!line[6]) runtime_fail("diagnostic window screenshot path");
             extern void dm_gfx_window_shot(const char *path); dm_gfx_window_shot(line + 6);
 #ifdef GAME_BOTW
+        } else if (!strncmp(line, "camfind ", 8) || !strncmp(line, "camnext ", 8)) {   /* memory scanner (game_patches_botw.c) */
+            float v = 0, t = 0; sscanf(line + 8, "%f %f", &v, &t); extern void botw_camfind(int, float, float); botw_camfind(line[3] == 'n', v, t);
+        } else if (!strncmp(line, "mousemove ", 10)) {   /* "mousemove <dx> <dy>": mouse movement as the window sends it (mouse mode on) */
+            double dx = 0, dy = 0; sscanf(line + 10, "%lf %lf", &dx, &dy); extern int runtime_mouse_set(int); extern void runtime_mouse_move(double, double);
+            runtime_mouse_set(1); runtime_mouse_move(dx, dy);
+        } else if (!strncmp(line, "actdump", 7)) { line[strcspn(line, "\r\n")] = 0; extern void botw_actdump(const char *); botw_actdump(line[7] ? line + 8 : "-");
+        } else if (!strcmp(line, "linkfind\n")) { extern void botw_linkfind(void); botw_linkfind();
+        } else if (!strncmp(line, "chasepoke ", 10)) { unsigned o = 0; float f = 0; sscanf(line + 10, "%x %f", &o, &f); extern void botw_chasepoke(unsigned, float); botw_chasepoke(o, f);
+        } else if (!strncmp(line, "camspin ", 8)) { double t = 0; int k = -1; sscanf(line + 8, "%lf %d", &t, &k); extern void botw_camspin(double, int); botw_camspin(t, k);
+        } else if (!strncmp(line, "chaseset ", 9)) { double t = 0, q = 0; sscanf(line + 9, "%lf %lf", &t, &q); extern void botw_chaseset(double, double); botw_chaseset(t, q);
+        } else if (!strncmp(line, "intfind ", 8) || !strncmp(line, "intnext ", 8)) { unsigned v = 0, wd = 4; sscanf(line + 8, "%u %u", &v, &wd); extern void botw_intfind(int, uint32_t, int); botw_intfind(line[3] == 'n', v, (int)wd);
+        } else if (!strncmp(line, "relrange ", 9)) { unsigned long long lo = 0, hi = 0; sscanf(line + 9, "%llx %llx", &lo, &hi); extern void botw_relrange(uint64_t, uint64_t); botw_relrange(lo, hi);
+        } else if (!strncmp(line, "relfind ", 8) || !strncmp(line, "relnext ", 8)) { extern void botw_relfind(int, int); botw_relfind(line[3] == 'n', atoi(line + 8));
+        } else if (!strncmp(line, "snapsave ", 9)) { line[strcspn(line, "\r\n")] = 0; extern void botw_snapsave(const char *); botw_snapsave(line + 9);
+        } else if (!strncmp(line, "snapkeep ", 9)) { char f[512] = "", m[8] = ""; sscanf(line + 9, "%511s %7s", f, m); extern void botw_snapkeep(const char *, int); botw_snapkeep(f, !strcmp(m, "same"));
+        } else if (!strncmp(line, "snapdump ", 9)) { line[strcspn(line, "\r\n")] = 0; extern void botw_snapdump(const char *); botw_snapdump(line + 9);
+        } else if (!strcmp(line, "snaplist\n")) { extern void botw_snaplist(void); botw_snaplist();
+        } else if (!strncmp(line, "region ", 7)) { extern void botw_region(uint64_t); botw_region(strtoull(line + 7, NULL, 16));
+        } else if (!strncmp(line, "pointer ", 8)) { double x = 0, y = 0; sscanf(line + 8, "%lf %lf", &x, &y); extern void runtime_menu_pointer(double, double); runtime_menu_pointer(x, y);
+        } else if (!strncmp(line, "wheel ", 6)) { extern void runtime_menu_wheel(int); runtime_menu_wheel(atoi(line + 6));
+        } else if (!strncmp(line, "titlego ", 8)) { extern void runtime_title_target(int); runtime_title_target(atoi(line + 8));
+        } else if (!strncmp(line, "poke64 ", 7)) { unsigned long long ad = 0, v = 0; sscanf(line + 7, "%llx %llx", &ad, &v); extern void botw_poke64(uint64_t, uint64_t); botw_poke64(ad, v);
+        } else if (!strncmp(line, "panefind ", 9)) { float x = 0, y = 0, t = 1; sscanf(line + 9, "%f %f %f", &x, &y, &t); extern void botw_panefind(float, float, float); botw_panefind(x, y, t);
+        } else if (!strncmp(line, "qfind ", 6)) { extern void botw_qfind(uint64_t); botw_qfind(strtoull(line + 6, NULL, 16));
+        } else if (!strcmp(line, "probes\n")) { extern void botw_probes(void); botw_probes();
+        } else if (!strcmp(line, "invobj\n")) { extern void botw_invobj(void); botw_invobj();
+        } else if (!strcmp(line, "slotsnow\n")) { extern int runtime_inventory_slots(void *, int, int *); float sl[64 * 3]; int sel = -1, n = runtime_inventory_slots(sl, 64, &sel);
+            fprintf(stderr, "[slotsnow] %d selected %d:", n, sel); for (int i = 0; i < n; i++) fprintf(stderr, " (%g,%g,%d)", sl[3 * i], sl[3 * i + 1], ((int *)sl)[3 * i + 2]); fprintf(stderr, "\n");
+        } else if (!strncmp(line, "slots ", 6)) { extern void botw_slots(uint64_t); botw_slots(strtoull(line + 6, NULL, 16));
+        } else if (!strncmp(line, "strfind ", 8)) { line[strcspn(line, "\r\n")] = 0; extern void botw_strfind(const char *); botw_strfind(line + 8);
+        } else if (!strcmp(line, "intctx\n")) { extern void botw_intctx(void); botw_intctx();
+        } else if (!strncmp(line, "pcsample ", 9)) { double sec = 3; unsigned long long lo = 0, hi = 0; sscanf(line + 9, "%lf %llx %llx", &sec, &lo, &hi); extern void botw_pcsample(double, uint64_t, uint64_t); botw_pcsample(sec, lo, hi);
+        } else if (!strncmp(line, "watch ", 6)) { unsigned long long ad = 0; double sec = 2; char m = 'w'; sscanf(line + 6, "%llx %lf %c", &ad, &sec, &m); extern void botw_watch(uint64_t, double, int); botw_watch(ad, sec, m == 'w');
+        } else if (!strncmp(line, "stick ", 6)) { int x = 0, y = 0; forcedStick = sscanf(line + 6, "%d %d", &x, &y) == 2; forcedLx = x; forcedLy = y;
+        } else if (!strcmp(line, "camsites\n")) { extern void botw_camsites(void); botw_camsites();
+        } else if (!strncmp(line, "camact ", 7)) { unsigned long long v = 0; char lab[16] = "-"; sscanf(line + 7, "%llx %15s", &v, lab); extern void botw_chase_vt(const char *, uint64_t); botw_chase_vt(lab, v);
+        } else if (!strncmp(line, "chase", 5)) { line[strcspn(line, "\r\n")] = 0; extern void botw_chase(const char *); botw_chase(line[5] ? line + 6 : "-");
+        } else if (!strncmp(line, "camset ", 7)) { extern void botw_camset(double); botw_camset(atof(line + 7));
+        } else if (!strcmp(line, "camyaw\n")) { extern void botw_camyaw(void); botw_camyaw();
+        } else if (!strncmp(line, "camscan", 7)) {   /* "camscan [label]": where the camera's position / target are stored */
+            line[strcspn(line, "\r\n")] = 0; extern void botw_camscan(const char *label); botw_camscan(line[7] ? line + 8 : "-");
+        } else if (!strncmp(line, "camhex ", 7)) {   /* "camhex <hex address> <hex bytes>": any memory, as camdump prints it */
+            unsigned long long at = 0, n = 0; sscanf(line + 7, "%llx %llx", &at, &n); extern void botw_camhex(unsigned long long, unsigned long long, const char *);
+            const char *lab = strrchr(line, ' '); line[strcspn(line, "\r\n")] = 0; botw_camhex(at, n, lab ? lab + 1 : "-");
+        } else if (!strncmp(line, "camdump", 7)) {   /* "camdump [label]": the main camera's memory (game_patches_botw.c) */
+            line[strcspn(line, "\r\n")] = 0; extern void botw_camdump(const char *label); botw_camdump(line[7] ? line + 8 : "-");
         } else if (!strncmp(line, "ashot ", 6)) {   /* "ashot <path>": the next game frame, written in the background, its present time logged (botw.md) */
             line[strcspn(line, "\r\n")] = 0; if (!line[6]) runtime_fail("diagnostic ashot path");
             extern void dm_gfx_ashot(const char *path); dm_gfx_ashot(line + 6);

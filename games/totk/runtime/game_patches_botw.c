@@ -7,16 +7,52 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <math.h>
 #include "game_patches.h"
 #include "game_version.h"
 #include "aspect_math.h"   /* the aspect ratio: TOTK_ASPECT parsing */
+#include "mouse_cam.h"     /* the mouse camera: chase_hook */
 #include <TargetConditionals.h>
 uint32_t runtime_thread_current_handle(void);
 static void botw_aspect_install(Module *m);   /* the aspect ratio, end of the file */
 static int patch_output_res(Module *m);   /* native output size, after runtime_output_res */
 static void botw_output_tick(void);       /* the size static follows the canvas after the start */
 static void botw_aspect_apply(void);
+static void probes_arm(Module *m);   /* TOTK_PROBE, before botw_jq_hook */
+enum { HORSE_CAM_RET = 0xd7f850 };   /* CameraHorse's update returns here (ret, after add sp, sp, #0xe0) */
+enum { HORSE_AI_SITE = 0x2a3960, HORSE_AI_WORD = 0xf9400660 };   /* HorseRiddenByPlayer's per-frame step (main+0x2a3900), at its ldr x0, [x19, #8] after the rider is fetched */
+static uint8_t *g_horse_ai_main;
+static uint8_t *g_horse_ret_main;
+enum { INV_PAGE_SITE = 0x11b66f8, INV_PAGE_WORD = 0xb9761c08, INV_PAGE_TURN = 0x11c1090, INV_PAGE_BACK = 0x11b6fcc };   /* the inventory pages, before botw_jq_hook */
+static uint8_t *g_inv_main; static _Atomic int g_inv_pages;
+enum { QUEST_SITE = 0x11b9b3c, QUEST_WORD = 0xf95dce68 };   /* the pause menu's Adventure Log step (runs while it is open), at ldr x8, [x19, #0x3b98] */
+static _Atomic uint64_t g_quest_ns;
+static _Atomic int g_quest_tab;
+int runtime_quest_tab(void) { return atomic_load(&g_quest_tab); }   /* the Adventure Log's tab (its list + 0x174, which this step compares with its copy) */
+int runtime_quest_log_live(void) { uint64_t t = atomic_load(&g_quest_ns); return t && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t < 150000000ull; }   /* the Adventure Log is open */
+/* The camera actions' per-frame updates the mouse camera hooks (TOTK_CHASE_HOOK): each starts with sub sp, sp, #frame. */
+static const struct { uint32_t off, word, frame; const char *name; } cam_sites[] = {
+    { 0xd43ab0, 0xd10543ffu, 0x150, "CameraChase" }, { 0xd39050, 0xd10643ffu, 0x190, "CameraAiming" }, { 0xd3e930, 0xd10603ffu, 0x180, "CameraAiming2" },
+    { 0xd799d0, 0xd10443ffu, 0x110, "CameraFinder" },
+    { 0xdae2d0, 0xd10443ffu, 0x110, "CameraLockOn" },   /* also Magnesis (CameraMagneCatch is a CameraLockOn) */
+    /* the rest: the same turn of the camera's position, their tilt with it */
+    { 0xd35700, 0xd10283ffu, 0xa0, "CameraAbyss" },
+    { 0xd4cde0, 0xd10303ffu, 0xc0, "CameraClimbObj" },
+    { 0xd7c3f0, 0xd10383ffu, 0xe0, "CameraHorse" },
+    { 0xd844a0, 0xd103c3ffu, 0xf0, "CameraHorseLockOnEmpty" },
+    { 0xd8f7b0, 0xd10503ffu, 0x140, "CameraMotorcycle" },
+    { 0xd98c80, 0xd104c3ffu, 0x130, "CameraMotorcycleLockOnEmpty" },
+    { 0xd9d070, 0xd10343ffu, 0xd0, "CameraRevolve" },
+    { 0xda0cb0, 0xd10483ffu, 0x120, "CameraShieldSurfing" },
+    { 0xda8700, 0xd10543ffu, 0x150, "CameraTail" },
+    { 0xdb59a0, 0xd10483ffu, 0x120, "CameraWakeboard" },
+    { 0xdbcfc0, 0xd10343ffu, 0xd0, "CameraWaterfallClimb" },
+};
+enum { CAM_SITES = sizeof cam_sites / sizeof cam_sites[0] };
+int runtime_mouse_camera_take_hooked;   /* gamepad.m: 1 once the camera updates are hooked (the mouse never feeds the stick) */
+static uint8_t *g_chase_main;
+static MouseCamHold g_tilt_hold; static double g_tilt_hold_s = 5;   /* pitch-hold.txt: seconds, read at the start */
 
 /* iOS cannot write code pages at run time: the iOS export (TOTK_EXPORT_IOS, runtime/loader.c export-ios) runs these
    patches on the Mac, and the patched text and patch area are embedded in the app (ios/tools/gen_embed.py), as for
@@ -591,6 +627,31 @@ void runtime_game_patches(Module *m) {
     if (!patch_output_res(m)) patch_render_1080(m);
     patch_phone_render(m);
     botw_aspect_install(m);
+    probes_arm(m);
+#ifdef GAME_BOTW160
+    { const char *h = getenv("TOTK_CHASE_HOOK");
+      for (int i = 0; i < CAM_SITES && !(h && !strcmp(h, "0")) && !ios_code(); i++) {
+          uint32_t w; memcpy(&w, m->base + cam_sites[i].off, 4);
+          if (w != cam_sites[i].word) { fprintf(stderr, "[botw] mouse camera: %s not hooked (main+%#x is %08x)\n", cam_sites[i].name, cam_sites[i].off, w); continue; }
+          uint32_t b = 0xd4200000u | (0x7d0u << 5); memcpy(m->base + cam_sites[i].off, &b, 4); g_chase_main = m->base; runtime_mouse_camera_take_hooked = 1;
+          fprintf(stderr, "[botw] mouse camera: %s update hooked\n", cam_sites[i].name);
+      }
+      extern int runtime_setting_word(const char *, char *, size_t); char w[32];
+      if (runtime_setting_word("pitch-hold.txt", w, sizeof w)) g_tilt_hold_s = fmax(0, atof(w));
+      fprintf(stderr, "[botw] mouse camera: a mouse tilt holds %g s before the game levels the view\n", g_tilt_hold_s); }
+    { uint32_t w; memcpy(&w, m->base + HORSE_AI_SITE, 4);
+      if (w == HORSE_AI_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d6u << 5); memcpy(m->base + HORSE_AI_SITE, &b, 4); g_horse_ai_main = m->base; }
+      fprintf(stderr, "[botw] horse ridden step: %s\n", g_horse_ai_main ? "hooked" : "not hooked"); }
+    { uint32_t w; memcpy(&w, m->base + HORSE_CAM_RET, 4);
+      if (g_chase_main && w == 0xd65f03c0u) { uint32_t b = 0xd4200000u | (0x7d5u << 5); memcpy(m->base + HORSE_CAM_RET, &b, 4); g_horse_ret_main = m->base; }
+      fprintf(stderr, "[botw] mouse camera: CameraHorse's return %s\n", g_horse_ret_main ? "hooked" : "not hooked"); }
+    { uint32_t w; memcpy(&w, m->base + QUEST_SITE, 4);
+      if (w == QUEST_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d8u << 5); memcpy(m->base + QUEST_SITE, &b, 4); }
+      fprintf(stderr, "[botw] quest log step: %s\n", w == QUEST_WORD ? "hooked" : "not hooked"); }
+    { uint32_t w; memcpy(&w, m->base + INV_PAGE_SITE, 4);
+      if (w == INV_PAGE_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d4u << 5); memcpy(m->base + INV_PAGE_SITE, &b, 4); g_inv_main = m->base; }
+      fprintf(stderr, "[botw] inventory pages: %s\n", g_inv_main ? "hooked" : "not hooked"); }
+#endif
     if (realtime_enabled()) patch_realtime(m);
     else fprintf(stderr, "[botw] real-time frame step off (TOTK_REALTIME=0): the game advances by its present interval\n");
     { const char *a = getenv("TOTK_EXCL_ACQUIRE");
@@ -638,7 +699,284 @@ static int botw_pad_hook(ucontext_t *u) {
     u->uc_mcontext->__ss.__pc += 4; return 1;
 }
 #endif
+/* The mouse camera (runtime/mouse_cam.h): a brk on CameraChase's per-frame update (main+0xd43ab0, sub sp, sp, #0x150,
+   emulated here). The update starts from the camera position the camera actor keeps (actor = *(*(chase + 0x28) + 8):
+   position +0x860, target +0x86c); the mouse movement since the last update turns that position around the target
+   first, so the game's own update (collision, Link's direction, its smoothing toward the target) carries on from there.
+   The tilt is the chase's own: degrees below level at chase + 0x1dc, between its limits at +0x1cc and +0x1d0 (-85, 89).
+   TOTK_CHASE_HOOK=0 leaves the game's code alone. */
+static uint8_t *g_uw_main;
+static int camdump_read(uint64_t addr, void *out, size_t n);
+extern int runtime_mouse_camera_take(double *right, double *down) __attribute__((weak));
+static uint64_t g_chase_live, g_cam_calls[CAM_SITES], g_cam_self[CAM_SITES]; static _Atomic uint64_t g_cam_last_ns, g_stick_cam_ns;
+static _Atomic uint64_t g_aim_cam_ns;   /* the last update of an aiming camera (CameraAiming, CameraAiming2: a rune out, the bow, the scope) */
+/* 1 while an aiming camera updates (the last within 150 ms): runtime/gamepad.m's left button uses a rune with it (A). */
+int runtime_rune_aim_live(void) { uint64_t t = atomic_load(&g_aim_cam_ns); return t && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t < 150000000ull; }
+/* The horse's heading (degrees) and forward speed (units per second), from the rider's matrix at CameraHorse's updates,
+   for runtime/input.c's keyboard riding. 0 while not riding. */
+static _Atomic uint64_t g_horse_ns; static _Atomic uint32_t g_horse_speed, g_horse_yaw;
+int runtime_horse_state(float *yaw, float *speed) { uint64_t t = atomic_load(&g_horse_ns); if (!t || clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t > 150000000ull) return 0;
+    uint32_t a = atomic_load(&g_horse_yaw), b = atomic_load(&g_horse_speed); memcpy(yaw, &a, 4); memcpy(speed, &b, 4); return 1; }
+int runtime_mouse_stick_camera(void) { uint64_t t = atomic_load(&g_stick_cam_ns); return t && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t < 150000000ull; }
+/* 1 while a camera action of the world updates (the last within 150 ms): not a menu, not paused. */
+int runtime_game_world_live(void) { uint64_t t = atomic_load(&g_cam_last_ns); return t && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t < 150000000ull; }
+void botw_camsites(void) { for (int i = 0; i < CAM_SITES; i++) fprintf(stderr, "[camsites] %s: %llu updates, last %#llx\n", cam_sites[i].name, (unsigned long long)g_cam_calls[i], (unsigned long long)g_cam_self[i]); }
+#define HORSE_TILT_UP 12   /* degrees up at most: further, the camera would sink under the ground (no collision here) */
+static float g_horse_look, g_horse_tilt;   /* the mouse's view on horseback: heading, elevation (degrees) */
+static int chase_hook(ucontext_t *u, int site) {
+    uint64_t self = u->uc_mcontext->__ss.__x[0], p, act; double right, down;
+    u->uc_mcontext->__ss.__sp -= cam_sites[site].frame; g_cam_calls[site]++; g_cam_self[site] = self;
+    atomic_store(&g_cam_last_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    if (site == 1 || site == 2) atomic_store(&g_aim_cam_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+    /* the tilt hold belongs to one stretch of the follow camera: another camera (scope, bow, rune, a cutscene) or a gap
+       (menu) ends it, else it would pull back to the tilt before them every frame against the game (a shake) */
+    { static uint64_t last_chase; uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      if (site != 0 || now - last_chase > 200000000ull) g_tilt_hold.until = 0;
+      if (site == 0) last_chase = now; }
+    if (site == 0) g_chase_live = self;
+    /* CameraLockOn (Magnesis, a locked target) works its heading out from the aim every frame (its own heading +0x178,
+       tilt +0x174 are overwritten): nothing to write, the mouse steers it through the stick (runtime_mouse_stick_camera) */
+    if (site == 4) { atomic_store(&g_stick_cam_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW)); u->uc_mcontext->__ss.__pc += 4; return 1; }
+    int moved = runtime_mouse_camera_take && runtime_mouse_camera_take(&right, &down);
+    if (site == 7 && runtime_mouse_enabled() && camdump_read(self + 0x28, &p, 8) && p && camdump_read(p + 8, &act, 8) && act) {
+        /* CameraHorse in mouse mode: the camera looks where the mouse put it (g_horse_look, the view's heading in degrees,
+           taken from the camera when riding starts) and nowhere else: its heading (+0x140 / +0x188, degrees, the opposite
+           way) is set here, and the position the update works out from the horse is turned onto it at its return
+           (horse_ret_hook). */
+        static uint64_t look_ns; uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        float *pos = (float *)(uintptr_t)(act + 0x860), c = atan2f(pos[3] - pos[0], pos[5] - pos[2]) * 180 / (float)M_PI;
+        if (!look_ns || now - look_ns > 2000000000ull) {   /* a new ride (a menu pauses it shorter) */
+            float dx = pos[3] - pos[0], dy = pos[4] - pos[1], dz = pos[5] - pos[2];
+            g_horse_look = c; g_horse_tilt = atan2f(dy, sqrtf(dx * dx + dz * dz)) * 180 / (float)M_PI;
+        }
+        look_ns = now;
+        if (moved) {
+            g_horse_look = (float)remainder(g_horse_look - right * 180 / M_PI, 360);
+            g_horse_tilt = fmaxf(-70, fminf(HORSE_TILT_UP, g_horse_tilt - (float)(down * 180 / M_PI)));
+        }
+        *(float *)(uintptr_t)(self + 0x140) = *(float *)(uintptr_t)(self + 0x188) = (float)remainder(g_horse_look + 180, 360);
+        moved = 0;
+    }
+    if (site == 7 && runtime_mouse_enabled() && camdump_read(self + 0x28, &p, 8) && p && camdump_read(p + 8, &act, 8) && act) {
+        /* The horse's heading and forward speed for the keyboard (runtime/input.c): the rider's matrix (*(camera actor +
+           0xc0) + 0x7b8, rows of 4), its z column and its position. */
+        uint64_t rider; float m[12];
+        if (camdump_read(act + 0xc0, &rider, 8) && rider && camdump_read(rider + 0x7b8, m, sizeof m)
+            && m[5] > 0.7f && fabsf(m[2] * m[2] + m[6] * m[6] + m[10] * m[10] - 1) < 0.05f) {
+            float h = (float)remainder(atan2f(m[2], m[10]) * 180 / M_PI + 180, 360);
+            static float last[2]; static uint64_t last_ns; uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+            if (last_ns && now - last_ns < 200000000ull && now > last_ns) {
+                float dx = m[3] - last[0], dz = m[11] - last[1], v = (dx * m[2] + dz * m[10]) / ((now - last_ns) * 1e-9f);   /* forward: backing up is negative */
+                static float vs; vs = 0.8f * vs + 0.2f * v; v = vs;   /* smoothed: the rider sways */
+                float yaw = h - 180; uint32_t a, b; memcpy(&a, &yaw, 4); memcpy(&b, &v, 4);
+                atomic_store(&g_horse_yaw, a); atomic_store(&g_horse_speed, b); atomic_store(&g_horse_ns, now);
+            }
+            last[0] = m[3]; last[1] = m[11]; last_ns = now;
+        }
+    }
+    if (site == 0 && !moved && g_tilt_hold.until > 0) {   /* no mouse this update: keep the tilt it set (pitch-hold.txt) */
+        mouse_cam_hold(&g_tilt_hold, (float *)(uintptr_t)(self + 0x1dc), 0, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) * 1e-9, g_tilt_hold_s);
+    }
+    if (moved && camdump_read(self + 0x28, &p, 8) && p && camdump_read(p + 8, &act, 8) && act) {
+        float *pos = (float *)(uintptr_t)(act + 0x860);
+        if (site == 0) {
+            float *pitch = (float *)(uintptr_t)(self + 0x1dc);
+            mouse_cam_take_over((uint8_t *)(uintptr_t)(self + 0x390));   /* the mouse steering it: the player's, not its return */
+            mouse_cam_orbit(pos, pos + 3, right, 0);
+            *pitch = mouse_cam_pitch_deg(*pitch, down, pitch[-4], pitch[-3]);
+            if (down != 0) mouse_cam_hold(&g_tilt_hold, pitch, 1, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) * 1e-9, g_tilt_hold_s);
+        } else if (site == 1 || site == 2) {   /* the aiming cameras (bow and scope; runes): their own heading and tilt in
+                                                 degrees (tilt below level), each kept twice, turned with the position */
+            static const struct { uint16_t head[2], tilt[2]; float lo, hi; } aim[3] = {
+                [1] = { { 0x230, 0x2a8 }, { 0x22c, 0x234 }, -80, 80 },   /* CameraAiming */
+                [2] = { { 0x238, 0x238 }, { 0x128, 0x234 }, -70, 89 },   /* CameraAiming2 */
+            };
+            mouse_cam_orbit(pos, pos + 3, right, 0);
+            for (int i = 0; i < 2; i++) {
+                float *h = (float *)(uintptr_t)(self + aim[site].head[i]), *t = (float *)(uintptr_t)(self + aim[site].tilt[i]);
+                if (i == 0 || aim[site].head[1] != aim[site].head[0]) *h = (float)remainder(*h - right * 180 / M_PI, 360);
+                *t = mouse_cam_pitch_deg(*t, down, aim[site].lo, aim[site].hi);
+            }
+        } else {
+            mouse_cam_orbit(pos, pos + 3, right, down);
+        }
+    }
+    u->uc_mcontext->__ss.__pc += 4; return 1;
+}
+/* Diagnostic TOTK_PROBE=<main offsets, comma separated>: a brk on each function's first instruction (a prologue:
+   sub sp / stp ... [sp, #-n]! / str ... [sp, #-n]!, emulated) counts its calls; "probes" prints the counts and zeroes them. */
+enum { PROBES_MAX = 128 };
+static uint8_t *g_probe_main; static uint32_t g_probe_off[PROBES_MAX], g_probe_word[PROBES_MAX]; static _Atomic uint32_t g_probe_calls[PROBES_MAX]; static uint64_t g_probe_lr[PROBES_MAX][4]; static int g_probe_n;
+static int probe_prologue(uint32_t w) { return (w & 0xffc003ff) == 0xd10003ff || (w & 0xffc003e0) == 0xa98003e0 || (w & 0xffe00fe0) == 0xf8000fe0; }
+static void probes_arm(Module *m) {
+    const char *e = getenv("TOTK_PROBE"); if (!e || !*e || ios_code()) return;
+    for (const char *p = e; *p && g_probe_n < PROBES_MAX; ) {
+        uint32_t off = (uint32_t)strtoul(p, (char **)&p, 0), w; memcpy(&w, m->base + off, 4);
+        if (probe_prologue(w)) { g_probe_off[g_probe_n] = off; g_probe_word[g_probe_n++] = w; uint32_t b = 0xd4200000u | (0x7d3u << 5); memcpy(m->base + off, &b, 4); }
+        while (*p == ',' || *p == ' ') p++;
+    }
+    g_probe_main = m->base; fprintf(stderr, "[botw] TOTK_PROBE: %d functions counted\n", g_probe_n);
+}
+void botw_probes(void) {
+    for (int i = 0; i < g_probe_n; i++) { uint32_t c = atomic_exchange(&g_probe_calls[i], 0);
+        if (c) { fprintf(stderr, "[probes] main+%#x %u from", g_probe_off[i], c);
+                 for (int k = 0; k < 4 && g_probe_lr[i][k]; k++) fprintf(stderr, " main+%#llx", (unsigned long long)(g_probe_lr[i][k] - (uintptr_t)g_probe_main));
+                 fprintf(stderr, "\n"); memset(g_probe_lr[i], 0, sizeof g_probe_lr[i]); } }
+    fprintf(stderr, "[probes] done\n");
+}
+static int probe_hook(ucontext_t *u, int i) {
+    uint32_t w = g_probe_word[i]; uint64_t *x = u->uc_mcontext->__ss.__x; uint64_t sp = u->uc_mcontext->__ss.__sp;
+    #define PROBE_REG(r) ((r) == 31 ? 0 : (r) == 29 ? u->uc_mcontext->__ss.__fp : (r) == 30 ? u->uc_mcontext->__ss.__lr : x[(r)])
+    if ((w & 0xffc003ff) == 0xd10003ff) { uint64_t imm = (w >> 10) & 0xfff; if ((w >> 22) & 1) imm <<= 12; sp -= imm; }
+    else if ((w & 0xffc003e0) == 0xa98003e0) { int64_t imm = (int64_t)((int32_t)(((w >> 15) & 0x7f) << 25) >> 25) * 8; sp += imm;
+        *(uint64_t *)(uintptr_t)sp = PROBE_REG(w & 31); *(uint64_t *)(uintptr_t)(sp + 8) = PROBE_REG((w >> 10) & 31); }
+    else { int64_t imm = (int32_t)(((w >> 12) & 0x1ff) << 23) >> 23; sp += imm; *(uint64_t *)(uintptr_t)sp = PROBE_REG(w & 31); }
+    #undef PROBE_REG
+    { uint64_t lr = u->uc_mcontext->__ss.__lr; for (int k = 0; k < 4; k++) { if (g_probe_lr[i][k] == lr) break; if (!g_probe_lr[i][k]) { g_probe_lr[i][k] = lr; break; } } }
+    u->uc_mcontext->__ss.__sp = sp; atomic_fetch_add(&g_probe_calls[i], 1); u->uc_mcontext->__ss.__pc += 4; return 1;
+}
+/* The inventory's pages (Weapons, Bows, ...): the screen's input step (main+0x11b66e0, every frame; it reads its input
+   at main+0x11b66f8, after saving its registers) turns a page with main+0x11c1090(screen, +1 right / -1 left), the
+   game's own page turn. The mouse (frontend.m: a wheel notch, a click on a page arrow) asks for pages here; the step
+   takes one per frame and makes that call instead of reading input, then returns through its own epilogue. */
+void runtime_inventory_page(int pages) { atomic_fetch_add(&g_inv_pages, pages); }
+static int inv_page_hook(ucontext_t *u) {
+    uint64_t *x = u->uc_mcontext->__ss.__x;
+    x[8] = *(uint32_t *)(uintptr_t)(x[0] + 0x361c);   /* ldr w8, [x0, #0x361c] */
+    int n = atomic_load(&g_inv_pages), d = n > 0 ? 1 : n < 0 ? -1 : 0;
+    if (!d || !atomic_compare_exchange_strong(&g_inv_pages, &n, n - d)) { u->uc_mcontext->__ss.__pc += 4; return 1; }
+    x[1] = (uint8_t)d;
+    u->uc_mcontext->__ss.__lr = (uintptr_t)g_inv_main + INV_PAGE_BACK; u->uc_mcontext->__ss.__pc = (uintptr_t)g_inv_main + INV_PAGE_TURN;
+    return 1;
+}
+/* CameraHorse's update recomputes the camera from the horse every frame while it moves: at its return the camera's
+   position is put round its target on the mouse's heading and elevation (g_horse_look, g_horse_tilt), at the distance
+   the game chose, so the view is the mouse's alone. */
+static int horse_ret_hook(ucontext_t *u) {
+    uint64_t p, act;
+    if (runtime_mouse_enabled() && g_cam_self[7] && camdump_read(g_cam_self[7] + 0x28, &p, 8) && p && camdump_read(p + 8, &act, 8) && act) {
+        float *pos = (float *)(uintptr_t)(act + 0x860), dx = pos[3] - pos[0], dy = pos[4] - pos[1], dz = pos[5] - pos[2];
+        float d = sqrtf(dx * dx + dy * dy + dz * dz), y = g_horse_look * (float)M_PI / 180, e = g_horse_tilt * (float)M_PI / 180;
+        pos[0] = pos[3] - d * cosf(e) * sinf(y); pos[1] = pos[4] - d * sinf(e); pos[2] = pos[5] - d * cosf(e) * cosf(y);
+    }
+    u->uc_mcontext->__ss.__pc = u->uc_mcontext->__ss.__lr; return 1;
+}
+/* Diagnostic "watch <hex address> <seconds> <r|w>": a hardware watchpoint on 4 bytes in every thread (re-armed every
+   10 ms, as game_patches_v143.c's frmwatch); each hit records the instruction and its return address and disarms that
+   thread, so the access runs again. The accessors are printed at the end (main offsets). */
+#include <mach/mach.h>
+static uint64_t g_watch_addr; static int g_watch_store;
+enum { WATCH_SLOTS = 512 };
+static struct { _Atomic uint64_t pc, lr; _Atomic uint32_t n; } g_watch_hits[WATCH_SLOTS];
+static void watch_set(thread_act_t t, int on) {
+    arm_debug_state64_t d; mach_msg_type_number_t c = ARM_DEBUG_STATE64_COUNT;
+    if (thread_get_state(t, ARM_DEBUG_STATE64, (thread_state_t)&d, &c) != KERN_SUCCESS) return;
+    d.__wvr[0] = on ? (g_watch_addr & ~7ULL) : 0;
+    d.__wcr[0] = on ? ((0xfULL << ((g_watch_addr & 7) + 5)) | ((g_watch_store ? 2u : 1u) << 3) | (2u << 1) | 1u) : 0;
+    thread_set_state(t, ARM_DEBUG_STATE64, (thread_state_t)&d, ARM_DEBUG_STATE64_COUNT);
+}
+static void watch_all(int on) {
+    thread_act_array_t list; mach_msg_type_number_t n; thread_act_t self = mach_thread_self();
+    if (task_threads(mach_task_self(), &list, &n) != KERN_SUCCESS) return;
+    for (unsigned i = 0; i < n; i++) { if (list[i] != self) { thread_suspend(list[i]); watch_set(list[i], on); thread_resume(list[i]); } mach_port_deallocate(mach_task_self(), list[i]); }
+    vm_deallocate(mach_task_self(), (vm_address_t)list, n * sizeof *list); mach_port_deallocate(mach_task_self(), self);
+}
+static int watch_trap(ucontext_t *u) {
+    uint64_t pc = u->uc_mcontext->__ss.__pc, lr = u->uc_mcontext->__ss.__lr; unsigned ec = (unsigned)(u->uc_mcontext->__es.__esr >> 26);
+    static _Atomic uint64_t armed_until;   /* a SIGTRAP that is not a brk while a watch runs (or just ran): a watch hit (the kernel may report it after the access) */
+    if (g_watch_addr) atomic_store(&armed_until, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 2000000000ull);
+    if (ec != 0x34 && ec != 0x35) {
+        if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) > atomic_load(&armed_until) || (*(const uint32_t *)(uintptr_t)pc & 0xffe0001fu) == 0xd4200000u) return 0;
+        ec = 0x35;
+    }
+    if (!g_watch_addr) { thread_act_t me = mach_thread_self(); watch_set(me, 0); mach_port_deallocate(mach_task_self(), me); return 1; }   /* a late hit after the watch ended */
+    if (pc == (uintptr_t)g_uw_main + 0x126e5c0) {   /* sead's stick-to-direction step, many times a frame: ldp s0, s1, [x1], emulated */
+        const float *f = (const float *)(uintptr_t)u->uc_mcontext->__ss.__x[1];
+        memset(&u->uc_mcontext->__ns.__v[0], 0, 16); memset(&u->uc_mcontext->__ns.__v[1], 0, 16);
+        memcpy(&u->uc_mcontext->__ns.__v[0], f, 4); memcpy(&u->uc_mcontext->__ns.__v[1], f + 1, 4);
+        u->uc_mcontext->__ss.__pc += 4; return 1;
+    }
+    for (unsigned i = (unsigned)(pc >> 2) % WATCH_SLOTS, k = 0; k < WATCH_SLOTS; k++, i = (i + 1) % WATCH_SLOTS) {
+        uint64_t z = 0; if (atomic_compare_exchange_strong(&g_watch_hits[i].pc, &z, pc) || z == pc) { atomic_store(&g_watch_hits[i].lr, lr); atomic_fetch_add(&g_watch_hits[i].n, 1); break; }
+    }
+    thread_act_t self = mach_thread_self(); watch_set(self, 0); mach_port_deallocate(mach_task_self(), self);
+    return 1;
+}
+static void *watch_run(void *arg) {
+    double secs = *(double *)arg; free(arg);
+    for (double t = 0; t < secs; t += 0.01) { watch_all(1); usleep(10000); }
+    watch_all(0); uint64_t base = (uintptr_t)g_uw_main;
+    for (unsigned i = 0; i < WATCH_SLOTS; i++) { uint64_t pc = atomic_load(&g_watch_hits[i].pc); if (!pc) continue;
+        fprintf(stderr, "[watch] main%+lld x%u lr main%+lld\n", (long long)(pc - base), atomic_load(&g_watch_hits[i].n), (long long)(atomic_load(&g_watch_hits[i].lr) - base));
+        atomic_store(&g_watch_hits[i].pc, 0); atomic_store(&g_watch_hits[i].n, 0); }
+    fprintf(stderr, "[watch] done\n"); g_watch_addr = 0; return NULL;
+}
+/* Diagnostic "pcsample <seconds> <hex lo> <hex hi>": samples every thread's pc every ms and prints the hottest 64-byte
+   blocks of main between lo and hi (which code runs while a screen is open). */
+static void *pcsample_run(void *arg) {
+    double *a = arg; double secs = a[0]; uint64_t lo = (uint64_t)a[1], hi = (uint64_t)a[2]; free(arg);
+    enum { N = 1 << 16 }; static uint32_t cnt[N]; memset(cnt, 0, sizeof cnt); uint64_t base = (uintptr_t)g_uw_main;
+    thread_act_t self = mach_thread_self();
+    for (double t = 0; t < secs; t += 0.001) {
+        thread_act_array_t list; mach_msg_type_number_t n; if (task_threads(mach_task_self(), &list, &n) != KERN_SUCCESS) break;
+        for (unsigned i = 0; i < n; i++) {
+            if (list[i] != self) { arm_thread_state64_t st; mach_msg_type_number_t c = ARM_THREAD_STATE64_COUNT;
+                if (thread_get_state(list[i], ARM_THREAD_STATE64, (thread_state_t)&st, &c) == KERN_SUCCESS) {
+                    uint64_t pc = arm_thread_state64_get_pc(st) - base; if (pc >= lo && pc < hi) { uint64_t k = (pc - lo) >> 6; if (k < N) cnt[k]++; } } }
+            mach_port_deallocate(mach_task_self(), list[i]); }
+        vm_deallocate(mach_task_self(), (vm_address_t)list, n * sizeof *list); usleep(1000);
+    }
+    mach_port_deallocate(mach_task_self(), self);
+    for (int r = 0; r < 40; r++) { uint32_t best = 0; int bi = -1; for (int k = 0; k < N; k++) if (cnt[k] > best) { best = cnt[k]; bi = k; }
+        if (bi < 0) break; fprintf(stderr, "[pcsample] main+%#llx %u\n", (unsigned long long)(lo + ((uint64_t)bi << 6)), best); cnt[bi] = 0; }
+    fprintf(stderr, "[pcsample] done\n"); return NULL;
+}
+void botw_pcsample(double secs, uint64_t lo, uint64_t hi) { double *a = malloc(3 * sizeof *a); a[0] = secs; a[1] = (double)lo; a[2] = (double)hi; pthread_t t; pthread_create(&t, NULL, pcsample_run, a); pthread_detach(t); }
+void botw_watch(uint64_t addr, double secs, int store) {
+    if (g_watch_addr) return;
+    g_watch_store = store; g_watch_addr = addr; fprintf(stderr, "[watch] %s %#llx for %g s\n", store ? "stores to" : "loads of", (unsigned long long)addr, secs);
+    double *a = malloc(sizeof *a); *a = secs; pthread_t t; pthread_create(&t, NULL, watch_run, a); pthread_detach(t);
+}
+/* Riding in mouse mode: HorseRiddenByPlayer's per-frame step (main+0x2a3900, zeldaret/botw actionHorseRiddenByPlayer)
+   copies the rider's input from the rider (at its stack + 0x10, fetched just before this site): +0x264 side * |side|,
+   +0x268 forward, +0x26c side, all relative to the horse. They are written here from W / A / D, so the horse goes where
+   it faces whatever the camera does: W forward, A / D turn, together a curve; S is the stick's back (rein in). Its static
+   params (pointers in the action) are set too: it never follows the road by itself (FamiliarityThresholdOfRailTrace) and
+   never changes the steering or gear against the rider (Resist...Probability). */
+static int horse_ai_hook(ucontext_t *u) {
+    uint64_t *x = u->uc_mcontext->__ss.__x, sp = u->uc_mcontext->__ss.__sp, rider = 0;
+    extern int runtime_horse_keys(void);
+    if (runtime_mouse_enabled() && camdump_read(sp + 0x10, &rider, 8) && rider) {
+        int k = runtime_horse_keys(); float fwd = (k & 1) ? 1 : 0, side = (k & 8) ? 1 : (k & 4) ? -1 : 0;
+        if (fwd && side) { fwd = 0.70710678f; side *= 0.70710678f; }
+        float *r = (float *)(uintptr_t)(rider + 0x264); r[0] = side * fabsf(side); r[1] = fwd; r[2] = side;
+        static const struct { uint16_t off; float value; } params[] = {
+            { 0xb8, 1e9f },   /* FamiliarityThresholdOfRailTrace */
+            { 0xd0, 0 },      /* ResistGearDownProbability */
+            { 0xd8, 0 },      /* ResistChangeSteeringProbability */
+        };
+        for (unsigned i = 0; i < sizeof params / sizeof *params; i++) {
+            uint64_t q = 0; if (camdump_read(x[19] + params[i].off, &q, 8) && q) *(float *)(uintptr_t)q = params[i].value;
+        }
+    }
+    camdump_read(x[19] + 8, &x[0], 8);   /* ldr x0, [x19, #8] */
+    u->uc_mcontext->__ss.__pc += 4; return 1;
+}
 int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was one of ours, handled */
+    if (g_horse_ai_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ai_main + HORSE_AI_SITE) return horse_ai_hook(context);
+    if (watch_trap(context)) return 1;
+    if (g_horse_ret_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ret_main + HORSE_CAM_RET) return horse_ret_hook(context);
+    if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + INV_PAGE_SITE) return inv_page_hook(context);
+    if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + QUEST_SITE) {
+        ucontext_t *u = context; uint64_t *x = u->uc_mcontext->__ss.__x, list = 0; camdump_read(x[19] + 0x3b98, &list, 8); x[8] = list;
+        atomic_store(&g_quest_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+        { int tab = -1; if (list) camdump_read(list + 0x174, &tab, 4); atomic_store(&g_quest_tab, tab); }
+        u->uc_mcontext->__ss.__pc += 4; return 1;
+    }
+    if (g_probe_main) { uint64_t pc = ((ucontext_t *)context)->uc_mcontext->__ss.__pc;
+        for (int i = 0; i < g_probe_n; i++) if (pc == (uintptr_t)g_probe_main + g_probe_off[i]) return probe_hook(context, i); }
+    if (g_chase_main) for (int i = 0; i < CAM_SITES; i++)
+        if (((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_chase_main + cam_sites[i].off) return chase_hook(context, i);
 #ifdef GAME_BOTW160
     if (g_pad_log_on && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_pad_main + PAD_LOOP) return botw_pad_hook(context);
 #endif
@@ -940,7 +1278,6 @@ int runtime_output_mode_set(int mode) {
 #define UW_CAMERA_SINGLETON 0x2cc4da0
 #define UW_PERSPECTIVE_VTABLE 0x2bb4d48
 #endif
-static uint8_t *g_uw_main;
 static float g_uw_wide;
 static float g_uw_start;   /* TOTK_ASPECT's ratio, 0 without it */
 static _Atomic(uint32_t) g_uw_on;
@@ -1101,4 +1438,597 @@ void runtime_aspect_view(double w, double h) {
     if (!(w > 0 && h > 0)) return;
     g_uw_view = (float)(w / h);
     if (g_uw_main) botw_aspect_phone(g_uw_view);
+}
+
+/* Diagnostic "camdump [label]" (TOTK_INPUT_FILE, mouse-camera research 2026-10-26): the main camera singleton
+   (UW_CAMERA_SINGLETON) and the heap objects its words point at, as floats and words, read with vm_read so a stale
+   pointer cannot fault. */
+#include <mach/mach.h>
+static int camdump_read(uint64_t addr, void *out, size_t n) {
+    vm_size_t got = 0;
+    return vm_read_overwrite(mach_task_self(), (vm_address_t)addr, n, (vm_address_t)out, &got) == KERN_SUCCESS && got == n;
+}
+static void camdump_block(const char *label, const char *name, uint64_t addr, size_t n) {
+    uint8_t b[0x400]; if (n > sizeof b) n = sizeof b;
+    if (!camdump_read(addr, b, n)) { fprintf(stderr, "[camdump %s] %s %#llx: unreadable\n", label, name, (unsigned long long)addr); return; }
+    fprintf(stderr, "[camdump %s] %s %#llx\n", label, name, (unsigned long long)addr);
+    for (size_t o = 0; o < n; o += 16) {
+        float f[4]; uint64_t q[2]; memcpy(f, b + o, 16); memcpy(q, b + o, 16);
+        fprintf(stderr, "[camdump %s] %s+%03zx  %12.5g %12.5g %12.5g %12.5g  %016llx %016llx\n", label, name, o, f[0], f[1], f[2], f[3],
+                (unsigned long long)q[0], (unsigned long long)q[1]);
+    }
+}
+void botw_camdump(const char *label) {
+    if (!g_uw_main) { fprintf(stderr, "[camdump] no main module\n"); return; }
+    uint64_t s; memcpy(&s, g_uw_main + UW_CAMERA_SINGLETON, 8);
+    fprintf(stderr, "[camdump %s] main %p singleton %#llx\n", label, (void *)g_uw_main, (unsigned long long)s);
+    if (!s) return;
+    uint8_t obj[0x208]; if (!camdump_read(s, obj, sizeof obj)) return;
+    camdump_block(label, "S", s, sizeof obj);
+    int shown = 0;
+    for (size_t o = 0; o + 8 <= sizeof obj && shown < 16; o += 8) {
+        uint64_t p; memcpy(&p, obj + o, 8);
+        if (p < 0x100000000ull || p > 0x7fffffffffffull || (p >= (uintptr_t)g_uw_main && p < (uintptr_t)g_uw_main + 0x4000000)) continue;
+        char name[16]; snprintf(name, sizeof name, "S%03zx", o);
+        camdump_block(label, name, p & ~7ull, 0x200); shown++;
+    }
+}
+
+/* Diagnostic "camscan <label>": every writable word in the process that holds one of the main LookAtCamera's
+   position or target coordinates (x, y, z in a row, within 0.05), to find the camera controller that computes them. */
+#include <mach/mach_vm.h>
+void botw_camscan(const char *label) {
+    uint64_t s; memcpy(&s, g_uw_main + UW_CAMERA_SINGLETON, 8); if (!s) return;
+    uint64_t cam; float v[6];
+    if (!camdump_read(s + 0x108, &cam, 8) || !camdump_read(cam + 0x38, v, sizeof v)) return;
+    fprintf(stderr, "[camscan %s] camera %#llx pos %g %g %g at %g %g %g\n", label, (unsigned long long)cam, v[0], v[1], v[2], v[3], v[4], v[5]);
+    mach_vm_address_t a = 0; unsigned hits = 0;
+    for (;;) {
+        mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+        if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) != KERN_SUCCESS) break;
+        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size < (8ull << 30)) {
+            const float *f = (const float *)(uintptr_t)a; size_t count = size / 4;
+            for (size_t i = 0; i + 3 <= count; i++) {
+                for (int k = 0; k < 2; k++) {
+                    const float *t = v + 3 * k;
+                    if (fabsf(f[i] - t[0]) < 0.05f && fabsf(f[i + 1] - t[1]) < 0.05f && fabsf(f[i + 2] - t[2]) < 0.05f) {
+                        if (hits++ < 200) fprintf(stderr, "[camscan %s] %s at %#llx\n", label, k ? "target" : "position", (unsigned long long)(uintptr_t)(f + i));
+                    }
+                }
+            }
+        }
+        a += size;
+    }
+    fprintf(stderr, "[camscan %s] %u hits\n", label, hits);
+}
+void botw_camhex(unsigned long long at, unsigned long long n, const char *label) { camdump_block(label, "H", at, n ? n : 0x100); }
+
+/* Diagnostic memory scanner (mouse-camera research): "camfind <value> <tolerance>" lists every writable float near
+   value; "camnext <value> <tolerance>" keeps those of the list that are now near the new value; "camlist" prints them. */
+static uint64_t *camfind_hits; static size_t camfind_n;
+static void camfind_print(const char *what) {
+    fprintf(stderr, "[camfind] %s: %zu\n", what, camfind_n);
+    for (size_t i = 0; i < camfind_n && i < 60; i++) { float f; camdump_read(camfind_hits[i], &f, 4); fprintf(stderr, "[camfind]   %#llx = %g\n", (unsigned long long)camfind_hits[i], f); }
+}
+void botw_camfind(int next, float value, float tol) {
+    if (!next) {
+        free(camfind_hits); camfind_hits = NULL; camfind_n = 0; size_t cap = 0;
+        mach_vm_address_t a = 0;
+        for (;;) {
+            mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+            if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) != KERN_SUCCESS) break;
+            if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size < (8ull << 30)) {
+                const float *f = (const float *)(uintptr_t)a;
+                for (size_t i = 0; i < size / 4; i++) if (fabsf(f[i] - value) <= tol) {
+                    if (camfind_n == cap) { cap = cap ? cap * 2 : 4096; camfind_hits = realloc(camfind_hits, cap * 8); }
+                    camfind_hits[camfind_n++] = (uintptr_t)(f + i);
+                }
+            }
+            a += size;
+        }
+        camfind_print("found");
+    } else {
+        size_t k = 0;
+        for (size_t i = 0; i < camfind_n; i++) { float f; if (camdump_read(camfind_hits[i], &f, 4) && fabsf(f - value) <= tol) camfind_hits[k++] = camfind_hits[i]; }
+        camfind_n = k; camfind_print("kept");
+    }
+}
+/* "camyaw": the main camera's direction from its position to its target: yaw atan2(x, z) and pitch, radians and degrees. */
+void botw_camyaw(void) {
+    uint64_t s, cam; float v[6]; memcpy(&s, g_uw_main + UW_CAMERA_SINGLETON, 8);
+    if (!s || !camdump_read(s + 0x108, &cam, 8) || !camdump_read(cam + 0x38, v, sizeof v)) return;
+    float dx = v[3] - v[0], dy = v[4] - v[1], dz = v[5] - v[2], h = sqrtf(dx * dx + dz * dz);
+    float yaw = atan2f(dx, dz), pitch = atan2f(dy, h);
+    fprintf(stderr, "[camyaw] yaw %.5f rad %.3f deg  pitch %.5f rad %.3f deg  distance %.3f  pos %g %g %g\n", yaw, yaw * 57.29578f, pitch, pitch * 57.29578f,
+            sqrtf(h * h + dy * dy), v[0], v[1], v[2]);
+}
+
+/* Mouse mode (runtime/gamepad.m, mouse_cam.h): where the main camera looks, from its LookAtCamera (singleton +0x108:
+   position +0x38, target +0x44). Yaw atan2(x, z) of the view direction (grows turning left), pitch up. 0 before the
+   camera exists or when it is degenerate. */
+int runtime_camera_angles(double *yaw, double *pitch) {
+    if (!g_uw_main) return 0;
+    uint64_t s, cam; float v[6]; memcpy(&s, g_uw_main + UW_CAMERA_SINGLETON, 8);
+    if (!s || !camdump_read(s + 0x108, &cam, 8) || !cam || !camdump_read(cam + 0x38, v, sizeof v)) return 0;
+    double dx = v[3] - v[0], dy = v[4] - v[1], dz = v[5] - v[2], h = sqrt(dx * dx + dz * dz);
+    if (h < 1e-4 || !isfinite(h)) return 0;
+    *yaw = atan2(dx, dz); *pitch = atan2(dy, h);
+    return 1;
+}
+/* Diagnostic "camset <radians>": turns the camera's position around its target once, to see whether the game keeps it. */
+void botw_camset(double turn) {
+    if (!g_uw_main) return;
+    uint64_t s, cam; float v[6]; memcpy(&s, g_uw_main + UW_CAMERA_SINGLETON, 8);
+    if (!s || !camdump_read(s + 0x108, &cam, 8) || !cam || !camdump_read(cam + 0x38, v, sizeof v)) return;
+    double ox = v[0] - v[3], oz = v[2] - v[5], c = cos(turn), sn = sin(turn);
+    float p[3] = { (float)(v[3] + ox * c + oz * sn), v[1], (float)(v[5] - ox * sn + oz * c) };
+    kern_return_t r = vm_write(mach_task_self(), (vm_address_t)(cam + 0x38), (vm_offset_t)p, sizeof p);
+    fprintf(stderr, "[camset] turn %g -> %d\n", turn, r);
+}
+/* Diagnostic "chase [label]": finds the CameraChase action (vtable main+0x2b64120, 0x398 bytes) and prints its floats. */
+#define CHASE_VTABLE 0x2b64120
+static uint64_t g_chase[8]; static int g_chase_n;
+void botw_chase_vt(const char *label, uint64_t vtoff);
+void botw_chase(const char *label) { botw_chase_vt(label, CHASE_VTABLE); }
+void botw_chase_vt(const char *label, uint64_t vtoff) {
+    if (!g_uw_main) return;
+    uint64_t vt = (uintptr_t)g_uw_main + vtoff;
+    g_chase_n = 0; mach_vm_address_t a = 0;
+    for (;;) {
+        mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+        if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) != KERN_SUCCESS) break;
+        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size < (8ull << 30)) {
+            const uint64_t *q = (const uint64_t *)(uintptr_t)a;
+            for (size_t i = 0; i < size / 8 && g_chase_n < 8; i++) if (q[i] == vt) g_chase[g_chase_n++] = (uintptr_t)(q + i);
+        }
+        a += size;
+    }
+    for (int k = 0; k < g_chase_n; k++) {
+        float f[0x500 / 4]; if (!camdump_read(g_chase[k], f, sizeof f)) continue;
+        fprintf(stderr, "[chase %s] %d at %#llx\n", label, k, (unsigned long long)g_chase[k]);
+        for (int i = 0; i < 0x500 / 4; i += 8) {
+            fprintf(stderr, "[chase %s] %d +%03x", label, k, i * 4);
+            for (int j = 0; j < 8; j++) fprintf(stderr, " %.6g", f[i + j]);
+            fprintf(stderr, "\n");
+        }
+    }
+}
+/* Diagnostic "chaseset <yaw radians> <pitch degrees>": the CameraChase whose position (+0x16c) is the camera's turns
+   its position around the camera's target and adds to its pitch (+0x1dc). */
+void botw_chaseset(double turn, double dpitch) {
+    if (!g_uw_main) return;
+    uint64_t s, cam; float v[6]; memcpy(&s, g_uw_main + UW_CAMERA_SINGLETON, 8);
+    if (!s || !camdump_read(s + 0x108, &cam, 8) || !cam || !camdump_read(cam + 0x38, v, sizeof v)) return;
+    if (!g_chase_n) botw_chase("set");
+    for (int k = 0; k < g_chase_n; k++) {
+        float p[3], pitch; if (!camdump_read(g_chase[k] + 0x16c, p, sizeof p) || !camdump_read(g_chase[k] + 0x1dc, &pitch, 4)) continue;
+        if (fabsf(p[0] - v[0]) > 1.5f || fabsf(p[2] - v[2]) > 1.5f) continue;
+        double ox = p[0] - v[3], oz = p[2] - v[5], c = cos(turn), sn = sin(turn);
+        float q[3] = { (float)(v[3] + ox * c + oz * sn), p[1], (float)(v[5] - ox * sn + oz * c) }, np = (float)(pitch + dpitch);
+        vm_write(mach_task_self(), (vm_address_t)(g_chase[k] + 0x16c), (vm_offset_t)q, sizeof q);
+        vm_write(mach_task_self(), (vm_address_t)(g_chase[k] + 0x1dc), (vm_offset_t)&np, 4);
+        fprintf(stderr, "[chaseset] %d: turn %g pitch %g -> %g\n", k, turn, pitch, np);
+    }
+}
+/* Diagnostic "camspin <radians> <index>": every writable copy of the camera position (within 0.01) is listed; index -1
+   turns all of them around the camera's target, index n only the n-th. */
+void botw_camspin(double turn, int only) {
+    if (!g_uw_main) return;
+    uint64_t s, cam; float v[6]; memcpy(&s, g_uw_main + UW_CAMERA_SINGLETON, 8);
+    if (!s || !camdump_read(s + 0x108, &cam, 8) || !cam || !camdump_read(cam + 0x38, v, sizeof v)) return;
+    double ox = v[0] - v[3], oz = v[2] - v[5], c = cos(turn), sn = sin(turn);
+    float q[3] = { (float)(v[3] + ox * c + oz * sn), v[1], (float)(v[5] - ox * sn + oz * c) };
+    uint64_t hit[64]; int n = 0; mach_vm_address_t a = 0;
+    for (;;) {
+        mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+        if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) break;
+        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size < (8ull << 30)) {
+            const float *f = (const float *)(uintptr_t)a;
+            for (size_t i = 0; i + 3 <= size / 4 && n < 64; i++)
+                if (fabsf(f[i] - v[0]) < 0.01f && fabsf(f[i + 1] - v[1]) < 0.01f && fabsf(f[i + 2] - v[2]) < 0.01f) hit[n++] = (uintptr_t)(f + i);
+        }
+        a += size;
+    }
+    for (int i = 0; i < n; i++) {
+        int w = only < 0 || only == i;
+        if (w) vm_write(mach_task_self(), (vm_address_t)hit[i], (vm_offset_t)q, sizeof q);
+        fprintf(stderr, "[camspin] %d %#llx%s\n", i, (unsigned long long)hit[i], w ? " turned" : "");
+    }
+}
+/* Diagnostic "chasepoke <offset> <float>": writes the float at that offset of every CameraChase. */
+void botw_chasepoke(unsigned off, float value) {
+    if (!g_chase_n) botw_chase("poke");
+    for (int k = 0; k < g_chase_n; k++) {
+        float old = 0; camdump_read(g_chase[k] + off, &old, 4);
+        vm_write(mach_task_self(), (vm_address_t)(g_chase[k] + off), (vm_offset_t)&value, 4);
+        fprintf(stderr, "[chasepoke] %d +%#x %g -> %g\n", k, off, old, value);
+    }
+}
+/* Diagnostic "actdump [label]": the object CameraChase works on (*(*(chase + 0x28) + 8), the camera actor), 0x1000
+   bytes as floats, and the 0x400 bytes behind each of its first 64 pointers into the heap. */
+void botw_actdump(const char *label) {
+    uint64_t p, act; if (!g_chase_live || !camdump_read(g_chase_live + 0x28, &p, 8) || !camdump_read(p + 8, &act, 8)) return;
+    static float f[0x400]; if (!camdump_read(act, f, sizeof f)) return;
+    fprintf(stderr, "[act %s] actor %#llx\n", label, (unsigned long long)act);
+    for (int i = 0; i < 0x400; i += 8) {
+        fprintf(stderr, "[act %s] A +%03x", label, i * 4);
+        for (int j = 0; j < 8; j++) fprintf(stderr, " %.6g", f[i + j]);
+        fprintf(stderr, "\n");
+    }
+}
+/* Diagnostic int scanner (menu research): "intfind <v>" lists every writable 32-bit word equal to v; "intnext <v>" keeps
+   those now equal to v; "intctx" prints, for each kept word, the main-module pointers (vtables) in the 0x800 bytes before it. */
+static uint64_t *intfind_hits; static size_t intfind_n; static int intfind_w = 4;
+void botw_intfind(int next, uint32_t value, int width) {
+    if (!next) intfind_w = width == 1 || width == 2 ? width : 4;
+    const int wd = intfind_w;
+    if (!next) {
+        free(intfind_hits); intfind_hits = NULL; intfind_n = 0; size_t cap = 0; mach_vm_address_t a = 0;
+        for (;;) {
+            mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+            if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) != KERN_SUCCESS) break;
+            if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size < (8ull << 30) && (a >> 32) >= 0x10) {
+                const uint8_t *b = (const uint8_t *)(uintptr_t)a;
+                for (size_t i = 0; i + wd <= size; i += wd) {
+                    uint32_t v = wd == 1 ? b[i] : wd == 2 ? *(const uint16_t *)(b + i) : *(const uint32_t *)(b + i);
+                    if (v != value) continue;
+                    if (intfind_n == cap) { cap = cap ? cap * 2 : 1 << 20; intfind_hits = realloc(intfind_hits, cap * 8); }
+                    intfind_hits[intfind_n++] = (uintptr_t)(b + i);
+                }
+            }
+            a += size;
+        }
+    } else {
+        size_t k = 0;
+        for (size_t i = 0; i < intfind_n; i++) { uint32_t w = 0; if (camdump_read(intfind_hits[i], &w, wd) && w == value) intfind_hits[k++] = intfind_hits[i]; }
+        intfind_n = k;
+    }
+    fprintf(stderr, "[intfind] %s %u: %zu\n", next ? "kept" : "found", value, intfind_n);
+    for (size_t i = 0; i < intfind_n && i < 40; i++) fprintf(stderr, "[intfind]   %#llx\n", (unsigned long long)intfind_hits[i]);
+}
+void botw_intctx(void) {
+    for (size_t i = 0; i < intfind_n && i < 40; i++) {
+        uint64_t q[0x100]; uint64_t at = (intfind_hits[i] & ~7ull) - sizeof q; if (!camdump_read(at, q, sizeof q)) continue;
+        for (int j = 0x100 - 1; j >= 0; j--) {
+            uint64_t off = q[j] - (uintptr_t)g_uw_main;
+            if (q[j] > (uintptr_t)g_uw_main && off < 0x3000000) fprintf(stderr, "[intctx] %#llx: -%#llx main+%#llx\n", (unsigned long long)intfind_hits[i], (unsigned long long)(intfind_hits[i] - (at + 8 * j)), (unsigned long long)off);
+        }
+    }
+}
+/* Diagnostic relative scan: "relfind <width>" keeps every writable word (1/2/4 bytes) below 64; "relnext <delta>" keeps
+   those that changed by exactly delta since the last step (an index with an unknown base). */
+static uint64_t *rel_at; static uint32_t *rel_v; static size_t rel_n; static int rel_w = 4;
+static uint64_t rel_lo, rel_hi;   /* "relrange <hex lo> <hex hi>": relfind looks only there (0 0: everywhere) */
+void botw_relrange(uint64_t lo, uint64_t hi) { rel_lo = lo; rel_hi = hi; fprintf(stderr, "[relfind] range %#llx..%#llx\n", (unsigned long long)lo, (unsigned long long)hi); }
+void botw_relfind(int next, int arg) {
+    if (!next) {
+        rel_w = arg == 1 || arg == 2 ? arg : 4; free(rel_at); free(rel_v); rel_at = NULL; rel_v = NULL; rel_n = 0; size_t cap = 0; mach_vm_address_t a = 0;
+        for (;;) {
+            mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+            if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) != KERN_SUCCESS) break;
+            if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size < (8ull << 30) && (a >> 32) >= 0x10) {
+                static uint8_t chunk[1 << 20];   /* copied with vm_read: a region can change or go away under the scan */
+                for (mach_vm_size_t c = 0; c < size; c += sizeof chunk) {
+                if (rel_hi && (a + c + sizeof chunk <= rel_lo || a + c >= rel_hi)) continue;
+                size_t len = size - c < sizeof chunk ? (size_t)(size - c) : sizeof chunk;
+                if (!camdump_read(a + c, chunk, len)) continue;
+                const uint8_t *b = chunk;
+                for (size_t i = 0; i + rel_w <= len; i += rel_w) {
+                    uint32_t v = rel_w == 1 ? b[i] : rel_w == 2 ? *(const uint16_t *)(b + i) : *(const uint32_t *)(b + i);
+                    if (v < 2 || v >= 64) continue;   /* start on an item past the first two: no 0 / 1 (most of memory) */
+                    if (rel_n == cap) {
+                        if (cap >= (1u << 27)) { fprintf(stderr, "[relfind] too many, stopped\n"); goto done; }
+                        cap = cap ? cap * 2 : 1 << 22; rel_at = realloc(rel_at, cap * 8); rel_v = realloc(rel_v, cap * 4);
+                        if (!rel_at || !rel_v) { fprintf(stderr, "[relfind] out of memory\n"); rel_n = 0; return; }
+                    }
+                    rel_at[rel_n] = a + c + i; rel_v[rel_n++] = v;
+                }
+                }
+            }
+            a += size;
+        }
+        done:;
+    } else {
+        size_t k = 0;
+        for (size_t i = 0; i < rel_n; i++) { uint32_t w = 0; if (camdump_read(rel_at[i], &w, rel_w) && (int64_t)w - rel_v[i] == arg) { rel_at[k] = rel_at[i]; rel_v[k++] = w; } }
+        rel_n = k;
+    }
+    fprintf(stderr, "[relfind] %s %d: %zu\n", next ? "kept" : "found", arg, rel_n);
+    for (size_t i = 0; i < rel_n && i < 30; i++) fprintf(stderr, "[relfind]   %#llx = %u\n", (unsigned long long)rel_at[i], rel_v[i]);
+}
+/* Diagnostic state-identity scan (menu research): "snapsave <file>" writes every writable region ({addr, len, bytes}...);
+   "snapkeep <file> same|diff" keeps the bytes that now equal (same) or differ from (diff) that snapshot. The first
+   snapkeep starts from every byte; each later one only narrows the list. "snaplist" prints the survivors with the
+   main-module pointers in the 0x400 bytes before them. */
+#include <fcntl.h>
+#include <unistd.h>
+static uint64_t *snap_at; static size_t snap_n; static int snap_started;
+void botw_snapsave(const char *file) {
+    int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0644); if (fd < 0) { fprintf(stderr, "[snap] cannot write %s\n", file); return; }
+    static uint8_t chunk[1 << 20]; mach_vm_address_t a = 0; uint64_t total = 0;
+    for (;;) {
+        mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+        if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) != KERN_SUCCESS) break;
+        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size < (8ull << 30) && (a >> 32) >= 0x10)
+            for (mach_vm_size_t c = 0; c < size; c += sizeof chunk) {
+                uint64_t hdr[2] = { a + c, size - c < sizeof chunk ? size - c : sizeof chunk };
+                if (!camdump_read(hdr[0], chunk, hdr[1])) continue;
+                if (write(fd, hdr, sizeof hdr) != sizeof hdr || write(fd, chunk, hdr[1]) != (ssize_t)hdr[1]) { fprintf(stderr, "[snap] write failed\n"); close(fd); return; }
+                total += hdr[1];
+            }
+        a += size;
+    }
+    close(fd); fprintf(stderr, "[snap] saved %llu MB to %s\n", (unsigned long long)(total >> 20), file);
+}
+void botw_snapkeep(const char *file, int same) {
+    int fd = open(file, O_RDONLY); if (fd < 0) { fprintf(stderr, "[snap] cannot read %s\n", file); return; }
+    static uint8_t old[1 << 20], now[1 << 20]; uint64_t hdr[2]; size_t k = 0, cap = snap_started ? snap_n : 0, i = 0;
+    uint64_t *out = snap_started ? snap_at : NULL;
+    while (read(fd, hdr, sizeof hdr) == sizeof hdr && read(fd, old, hdr[1]) == (ssize_t)hdr[1]) {
+        uint64_t lo = hdr[0], hi = hdr[0] + hdr[1];
+        if (snap_started) {
+            while (i < snap_n && snap_at[i] < lo) i++;
+            if (i >= snap_n || snap_at[i] >= hi) continue;
+            if (!camdump_read(lo, now, hdr[1])) { while (i < snap_n && snap_at[i] < hi) i++; continue; }
+            for (; i < snap_n && snap_at[i] < hi; i++) { uint64_t o = snap_at[i] - lo; if ((now[o] == old[o]) == same) out[k++] = snap_at[i]; }
+        } else {
+            if (!camdump_read(lo, now, hdr[1])) continue;
+            for (uint64_t o = 0; o < hdr[1]; o++) if ((now[o] == old[o]) == same) {
+                if (k == cap) { if (cap >= (1u << 27)) { fprintf(stderr, "[snap] too many, stopped\n"); goto end; } cap = cap ? cap * 2 : 1 << 20; out = realloc(out, cap * 8); }
+                out[k++] = lo + o;
+            }
+        }
+    }
+end:
+    close(fd); snap_at = out; snap_n = k; snap_started = 1;
+    fprintf(stderr, "[snap] kept %s: %zu\n", same ? "same" : "diff", snap_n);
+}
+void botw_snapdump(const char *label) {   /* "snapdump <label>": every survivor's byte now, for comparing states */
+    for (size_t i = 0; i < snap_n && i < 200000; i++) { uint8_t v = 0; camdump_read(snap_at[i], &v, 1); fprintf(stderr, "[snapdump %s] %#llx %u\n", label, (unsigned long long)snap_at[i], v); }
+}
+void botw_snaplist(void) {
+    for (size_t i = 0; i < snap_n && i < 60; i++) {
+        uint8_t b = 0; camdump_read(snap_at[i], &b, 1);
+        fprintf(stderr, "[snap]   %#llx = %u\n", (unsigned long long)snap_at[i], b);
+        uint64_t q[0x80]; uint64_t at = (snap_at[i] & ~7ull) - sizeof q; if (!camdump_read(at, q, sizeof q)) continue;
+        for (int j = 0x80 - 1; j >= 0; j--) { uint64_t off = q[j] - (uintptr_t)g_uw_main;
+            if (q[j] > (uintptr_t)g_uw_main && off < 0x3000000) { fprintf(stderr, "[snap]     -%#llx main+%#llx\n", (unsigned long long)(snap_at[i] - (at + 8 * j)), (unsigned long long)off); break; } }
+    }
+}
+/* Diagnostic "strfind <text>": every writable copy of the text (a layout or pane name), with the 0x20 bytes before it. */
+void botw_strfind(const char *text) {
+    size_t tl = strlen(text); if (!tl) return; static uint8_t chunk[1 << 20]; mach_vm_address_t a = 0; int hits = 0;
+    for (;;) {
+        mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+        if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) != KERN_SUCCESS) break;
+        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size < (8ull << 30) && (a >> 32) >= 0x10)
+            for (mach_vm_size_t c = 0; c < size; c += sizeof chunk) {
+                size_t len = size - c < sizeof chunk ? (size_t)(size - c) : sizeof chunk;
+                if (!camdump_read(a + c, chunk, len)) continue;
+                for (size_t i = 0; i + tl <= len; i++) if (chunk[i] == (uint8_t)text[0] && !memcmp(chunk + i, text, tl) && hits++ < 80) {
+                    char s[48]; size_t k = 0; for (; k < 47 && i + k < len && chunk[i + k] >= 32 && chunk[i + k] < 127; k++) s[k] = (char)chunk[i + k]; s[k] = 0;
+                    fprintf(stderr, "[strfind] %#llx %s\n", (unsigned long long)(a + c + i), s);
+                }
+            }
+        a += size;
+    }
+    fprintf(stderr, "[strfind] %s: %d\n", text, hits);
+}
+/* Diagnostic "region <hex address>": the region holding the address (base, size, protection). */
+void botw_region(uint64_t addr) {
+    mach_vm_address_t a = addr; mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+    if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) != KERN_SUCCESS) return;
+    fprintf(stderr, "[region] %#llx in %#llx..%#llx (+%#llx) prot %d\n", (unsigned long long)addr, (unsigned long long)a, (unsigned long long)(a + size), (unsigned long long)(addr - a), info.protection);
+}
+/* The title menu's selected item for the mouse pointer (runtime/menu_pointer.h, frontend.m): the cursor's corner pane
+   N_LT_00 (vtable main+0x2c22488, name at +0xb8, translate x/y at +0x30/+0x34) is made early in the UI heap (its first MB past a
+   16 MB boundary; where exactly depends on what was loaded before, the DLC moves it), found by its vtable and name; it is looked up there (once a second while missing) and checked by vtable and name. Only while no
+   camera action of the world updates (runtime_game_world_live), and only while the corner sits on the title grid.
+   -1: not the title. */
+#include "menu_pointer.h"
+#include "menu_grid.h"
+#define TITLE_CURSOR_VTABLE 0x2c22488
+static uint64_t g_cursor_rd;   /* the frame's N_RD_00, found with N_LT_00 */
+static uint64_t title_pane(void) {   /* the cursor layout's N_LT_00, 0 while not found */
+    static uint64_t pane; static uint64_t next_look;
+    uint64_t vt = (uintptr_t)g_uw_main + TITLE_CURSOR_VTABLE, q[2]; char name[8];
+    if (pane && !(camdump_read(pane, q, 8) && q[0] == vt && camdump_read(pane + 0xb8, name, 8) && !memcmp(name, "N_LT_00", 8))) pane = g_cursor_rd = 0;
+    if (!pane) {
+        uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); if (now < next_look) return 0; next_look = now + 1000000000ull;
+        /* the UI heap starts on a 16 MB boundary; the cursor layout is made early, within its first MB (where depends on
+           what was loaded before: the DLC moves it) */
+        static uint64_t chunk[0x20000]; mach_vm_address_t a = 0; uint64_t lt = 0, rd = 0;
+        for (;;) {
+            mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+            if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) != KERN_SUCCESS) break;
+            if (info.protection & VM_PROT_READ)
+                for (uint64_t c = (a + 0xffffff) & ~0xffffffull; c + sizeof chunk <= a + size && !lt; c += 0x1000000) {
+                    if (!camdump_read(c, chunk, sizeof chunk)) continue;
+                    for (size_t i = 0; i + 0x20 < sizeof chunk / 8; i++) if (chunk[i] == vt) {
+                        const char *nm = (const char *)&chunk[i + 0xb8 / 8];
+                        if (!memcmp(nm, "N_LT_00", 8)) lt = c + i * 8;
+                        else if (!memcmp(nm, "N_RD_00", 8) && lt) rd = c + i * 8;
+                        if (lt && rd) break;
+                    }
+                    if (lt && !rd) lt = 0;
+                }
+            if (lt) break;
+            a += size;
+        }
+        pane = lt; g_cursor_rd = rd;
+        if (pane) fprintf(stderr, "[botw] menu cursor found at %#llx (corners %#llx)\n", (unsigned long long)pane, (unsigned long long)rd);
+    }
+    return pane;
+}
+static int g_title_count = 5;
+int runtime_title_count(void) { return g_title_count; }   /* 5, or 6 with the DLC */
+int runtime_title_cursor(void) {
+    if (!g_uw_main || runtime_game_world_live()) return -1;
+    uint64_t pane = title_pane(); float xy[2];
+    if (!pane || !camdump_read(pane + 0x30, xy, sizeof xy)) return -1;
+    return menu_title_index(xy[0], xy[1], &g_title_count);
+}
+/* The selection frame of the other menus with this cursor (the load list, Start / Cancel, the inventory): r = {left, top,
+   right, bottom} from N_LT_00 and N_RD_00 (found with it, checked by name), while the world is stopped, it is a box,
+   and it is drawn (menu_frame_shown). Called every few ms, also while the world runs. */
+/* The inventory page as the game shows it (runtime/menu_grid.h): from the cursor object (the one whose +0x28 is the
+   cursor's N_LT_00, vtable main+0x2bbc318) its +0x48 is the selected slot; slots are a list (node at +8: prev, next),
+   each with its button pane Pa_Btn_NN (at +0xf8, further in the page's first slot; screen place: global matrix x at
+   +0x7c, y at +0x8c) and N_Born_00 0x1a0 past it, shown (flags bit 0x80) only while the slot holds an item. Only the slots of the page on screen (x within the grid).
+   Returns how many, with *selected the index of the selected one (-1 when it is not on the page), 0 when it is not
+   the inventory. */
+#define CURSOR_OBJ_VTABLE 0x2bbc318
+static uint64_t cursor_object(void) {
+    static uint64_t obj; uint64_t lt = title_pane(), q[2];
+    if (!lt) return 0;
+    if (obj && camdump_read(obj, q, 8) && q[0] == (uintptr_t)g_uw_main + CURSOR_OBJ_VTABLE && camdump_read(obj + 0x28, &q[1], 8) && q[1] == lt) return obj;
+    obj = 0; static uint64_t chunk[0x20000]; uint64_t c = lt & ~0xffffffull;
+    if (!camdump_read(c, chunk, sizeof chunk)) return 0;
+    for (size_t i = 5; i < sizeof chunk / 8; i++)
+        if (chunk[i] == lt && chunk[i - 5] == (uintptr_t)g_uw_main + CURSOR_OBJ_VTABLE) { obj = c + (i - 5) * 8; break; }
+    return obj;
+}
+static int slot_read(uint64_t e, MenuSlot *out) {   /* the button pane is at +0xf8 in most slots, further in the page's first */
+    uint8_t head[0x400]; uint8_t born = 0; float x, y;
+    if (!camdump_read(e, head, sizeof head)) return 0;
+    for (size_t o = 0xf8; o + 0xb8 + 8 <= sizeof head; o += 8) {
+        if (memcmp(head + o + 0xb8, "Pa_Btn_", 7)) continue;
+        uint64_t pane = e + o;
+        if (!camdump_read(pane + 0x7c, &x, 4) || !camdump_read(pane + 0x8c, &y, 4) || !camdump_read(pane + 0x1a0 + 0x58, &born, 1)) return 0;
+        *out = (MenuSlot){ x, y, (born & 0x80) != 0 };
+        return 1;
+    }
+    return 0;
+}
+int runtime_inventory_slots(MenuSlot *out, int max, int *selected) {
+    *selected = -1;
+    uint64_t obj = cursor_object(), sel; MenuSlot m;
+    if (!obj || !camdump_read(obj + 0x48, &sel, 8) || !slot_read(sel, &m)) return 0;
+    int n = 0;
+    for (int dir = 0; dir < 2; dir++) {
+        uint64_t e = sel;
+        for (int k = 0; k < 200 && n < max; k++) {
+            if (!slot_read(e, &m)) break;
+            if ((dir == 0 || k > 0) && m.x > MENU_GRID_PAGE_LEFT_X && m.x < MENU_GRID_PAGE_RIGHT_X) out[n++] = m;
+            uint64_t node[2]; if (!camdump_read(e + 8, node, sizeof node)) break;
+            uint64_t nx = dir == 0 ? node[1] : node[0];
+            if (!nx || nx - 8 == sel) break;
+            e = nx - 8;
+        }
+    }
+    n = menu_slots_complete(out, n, max);
+    float at[2];   /* the selected slot: where the cursor goes (+0x58), which also finds the page's first slot */
+    if (camdump_read(obj + 0x58, at, sizeof at))
+        for (int i = 0; i < n; i++) if (fabsf(out[i].x - at[0]) < 3 && fabsf(out[i].y - at[1]) < 3) *selected = i;
+    return n;
+}
+int runtime_menu_frame(float r[4]) {
+    if (!g_uw_main) return 0;
+    uint64_t pane = title_pane(); float lt[2], rd[2]; char name[8]; uint8_t alpha;
+    if (!pane || !g_cursor_rd || !camdump_read(pane + 0x30, lt, sizeof lt) || !camdump_read(pane + 0x5a, &alpha, 1) || !camdump_read(g_cursor_rd + 0xb8, name, 8) || memcmp(name, "N_RD_00", 8)
+        || !camdump_read(g_cursor_rd + 0x30, rd, sizeof rd)) return 0;
+    r[0] = lt[0]; r[1] = lt[1]; r[2] = rd[0]; r[3] = rd[1];
+    return menu_frame_shown(alpha) && !runtime_game_world_live() && menu_frame_valid(r[0], r[1], r[2], r[3]);
+}
+/* Diagnostic "poke64 <hex address> <hex value>": writes 8 bytes. */
+void botw_poke64(uint64_t addr, uint64_t value) {
+    kern_return_t r = vm_write(mach_task_self(), (vm_address_t)addr, (vm_offset_t)&value, 8);
+    fprintf(stderr, "[poke64] %#llx = %#llx -> %d\n", (unsigned long long)addr, (unsigned long long)value, r);
+}
+/* Diagnostic "linkfind": from the camera actor (*(*(chase + 0x28) + 8)) and the chase, every heap pointer whose object
+   (first 0x800 bytes) holds a 3x4 matrix with the camera's target as its translation (Link's), printed with the matrix. */
+void botw_linkfind(void) {
+    uint64_t p, act; if (!g_chase_live || !camdump_read(g_chase_live + 0x28, &p, 8) || !camdump_read(p + 8, &act, 8)) return;
+    float at[3]; if (!camdump_read(act + 0x86c, at, sizeof at)) return;
+    fprintf(stderr, "[linkfind] target %g %g %g\n", at[0], at[1], at[2]);
+    uint64_t roots[2] = { act, g_chase_live };
+    for (int r = 0; r < 2; r++) {
+        static uint64_t q[0x200]; if (!camdump_read(roots[r], q, sizeof q)) continue;
+        for (int i = 0; i < 0x200; i++) {
+            if ((q[i] >> 36) != 7 && (q[i] >> 32) < 0x70) continue;
+            static float f[0x200]; if (!camdump_read(q[i], f, sizeof f)) continue;
+            for (int k = 3; k + 8 < 0x200; k++)
+                if (fabsf(f[k] - at[0]) < 3 && fabsf(f[k + 4] - at[1]) < 3 && fabsf(f[k + 8] - at[2]) < 3)
+                    fprintf(stderr, "[linkfind] root %d +%#x -> %#llx +%#x: [%g %g %g %g | %g %g %g %g | %g %g %g %g]\n", r, i * 8, (unsigned long long)q[i], (k - 3) * 4,
+                            f[k-3], f[k-2], f[k-1], f[k], f[k+1], f[k+2], f[k+3], f[k+4], f[k+5], f[k+6], f[k+7], f[k+8]);
+        }
+    }
+}
+/* Diagnostic "panefind <x> <y> <tol>": every writable float pair near (x, y) whose place minus 0x30 looks like a layout
+   pane (a name at +0xb8), printed with that name: which pane sits where on screen. */
+void botw_panefind(float x, float y, float tol) {
+    static uint8_t chunk[1 << 20]; mach_vm_address_t a = 0; int hits = 0;
+    for (;;) {
+        mach_vm_size_t size = 0; vm_region_basic_info_data_64_t info; mach_msg_type_number_t n = VM_REGION_BASIC_INFO_COUNT_64; mach_port_t obj;
+        if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &n, &obj) != KERN_SUCCESS) break;
+        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size < (8ull << 30) && (a >> 32) >= 0x10)
+            for (mach_vm_size_t c = 0; c < size; c += sizeof chunk) {
+                size_t len = size - c < sizeof chunk ? (size_t)(size - c) : sizeof chunk;
+                if (!camdump_read(a + c, chunk, len)) continue;
+                for (size_t i = 0; i + 8 <= len; i += 4) {
+                    float fx, fy; memcpy(&fx, chunk + i, 4); memcpy(&fy, chunk + i + 4, 4);
+                    if (fabsf(fx - x) > tol || fabsf(fy - y) > tol) continue;
+                    uint64_t pane = a + c + i - 0x30; char name[25] = {0};
+                    if (!camdump_read(pane + 0xb8, name, 24)) continue;
+                    int ok = name[0] >= 'A' && name[0] <= 'Z'; for (int k = 0; k < 24 && name[k]; k++) if (name[k] < 32 || name[k] > 126) ok = 0;
+                    if (ok && hits++ < 60) fprintf(stderr, "[panefind] %#llx (%g, %g) %s\n", (unsigned long long)pane, fx, fy, name);
+                }
+            }
+        a += size;
+    }
+    fprintf(stderr, "[panefind] done %d\n", hits);
+}
+/* Diagnostic "slots <hex element>": walks the inventory's slot list both ways from that element (node at +8: prev,
+   next) and prints each slot's root pane (+0xf8: name, flags, global x / y at +0x7c / +0x8c). */
+void botw_slots(uint64_t start) {
+    uint64_t e = start; int n = 0;
+    for (int dir = 0; dir < 2; dir++) {
+        e = start;
+        for (int k = 0; k < 200; k++) {
+            uint64_t node[2]; char name[24] = {0}; uint8_t fl[4] = {0}; float x = 0, y = 0;
+            uint64_t pane = e + 0xf8;
+            if (!camdump_read(pane + 0xb8, name, 23) || !camdump_read(pane + 0x58, fl, 4) || !camdump_read(pane + 0x7c, &x, 4) || !camdump_read(pane + 0x8c, &y, 4)) break;
+            if (dir == 0 || k > 0) fprintf(stderr, "[slots] %d %#llx %s flags %02x %02x %02x alpha? pos %g %g\n", n++, (unsigned long long)e, name, fl[0], fl[1], fl[2], x, y);
+            if (!camdump_read(e + 8, node, sizeof node)) break;
+            uint64_t nx = dir == 0 ? node[1] : node[0];
+            if (!nx || nx - 8 == start) break;
+            e = nx - 8;
+        }
+    }
+    fprintf(stderr, "[slots] done %d\n", n);
+}
+
+/* Diagnostic "invobj": the cursor object, its selected slot, and the slot list walked forward to its head (the node
+   that is no slot): prints the head node's address and the main-module pointers (vtables) in the 0x200 bytes before it. */
+void botw_invobj(void) {
+    uint64_t obj = cursor_object(), e; MenuSlot m;
+    if (!obj || !camdump_read(obj + 0x48, &e, 8)) { fprintf(stderr, "[invobj] no cursor\n"); return; }
+    fprintf(stderr, "[invobj] cursor %#llx selected %#llx main %#llx\n", (unsigned long long)obj, (unsigned long long)e, (unsigned long long)(uintptr_t)g_uw_main);
+    for (int k = 0; k < 200; k++) {
+        uint64_t node[2]; if (!camdump_read(e + 8, node, sizeof node)) return;
+        uint64_t nx = node[1];
+        if (!slot_read(nx - 8, &m)) {
+            fprintf(stderr, "[invobj] head node %#llx (after %d slots)\n", (unsigned long long)nx, k);
+            uint64_t q[0x40]; if (!camdump_read(nx - 0x200, q, sizeof q)) return;
+            for (int i = 0; i < 0x40; i++) { uint64_t off = q[i] - (uintptr_t)g_uw_main;
+                if (q[i] > (uintptr_t)g_uw_main && off < 0x3000000) fprintf(stderr, "[invobj]   head-%#x: main+%#llx\n", 0x200 - 8 * i, (unsigned long long)off); }
+            return;
+        }
+        e = nx - 8;
+    }
+}
+/* Diagnostic "qfind <hex value>": every 8-aligned qword equal to it in the relrange (relfind's range), with the
+   main-module pointers (vtables) found in the 0x400 bytes before each hit. */
+void botw_qfind(uint64_t value) {
+    static uint64_t chunk[1 << 17]; int hits = 0;
+    for (uint64_t c = rel_lo; c < rel_hi; c += sizeof chunk) {
+        if (!camdump_read(c, chunk, sizeof chunk)) continue;
+        for (size_t i = 0; i < sizeof chunk / 8; i++) if (chunk[i] == value && hits++ < 40) {
+            uint64_t at = c + i * 8; fprintf(stderr, "[qfind] %#llx at %#llx\n", (unsigned long long)value, (unsigned long long)at);
+            uint64_t q[0x80]; if (!camdump_read(at - sizeof q, q, sizeof q)) continue;
+            for (int j = 0x7f; j >= 0; j--) { uint64_t off = q[j] - (uintptr_t)g_uw_main;
+                if (q[j] > (uintptr_t)g_uw_main && off < 0x3000000) { fprintf(stderr, "[qfind]   -%#x main+%#llx\n", (int)(sizeof q - 8 * j), (unsigned long long)off); break; } }
+        }
+    }
+    fprintf(stderr, "[qfind] done %d\n", hits);
 }

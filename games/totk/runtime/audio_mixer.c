@@ -162,6 +162,12 @@ static void output_open(Mixer *m, int rate) {
         fprintf(stderr, "[totk-audio] 【红】CoreAudio output setup failed: mixing without sound\n"); AudioComponentInstanceDispose(m->unit); return;
     }
     m->unit_ok = 1; fprintf(stderr, "[totk-audio] CoreAudio output %d Hz stereo\n", rate);
+#if !TARGET_OS_IPHONE
+    { extern int runtime_setting_word(const char *, char *, size_t); char w[32];   /* volume.txt: the game's volume in percent */
+      if (runtime_setting_word("volume.txt", w, sizeof w)) { double v = fmin(100, fmax(0, atof(w)));
+          AudioUnitSetParameter(m->unit, kHALOutputParam_Volume, kAudioUnitScope_Global, 0, (AudioUnitParameterValue)(v / 100), 0);
+          fprintf(stderr, "[totk-audio] volume %g%% (volume.txt)\n", v); } }
+#endif
 }
 /* iOS (from nxnative b301431): the system stops the RemoteIO unit when another app takes the audio session (a call,
    Siri, an alarm) and invalidates it when media services are reset. Nothing started it again, so the game stayed

@@ -14,6 +14,17 @@ int runtime_gyro_enabled(void) { return gyroOn; }
 void runtime_motion_mouse(int on) { motionMouse = on; }
 void runtime_motion_feed_mouse(const double acc[3], const double gyro[3], uint64_t now) { (void)now; feeds++; lastYaw = gyro[2]; lastAcc = acc[2]; }
 static void hook(void) { hookCalls++; }
+/* the game's side (game_patches_botw.c, input.c): in the world, no menu, no bar, no hooked camera */
+int runtime_game_world_live(void) { return 1; }
+int runtime_title_cursor(void) { return -1; }
+int runtime_mouse_camera_take_hooked;
+int runtime_mouse_stick_camera(void) { return 0; }
+int runtime_input_dpad_held(void) { return 0; }
+int runtime_input_zl_held(void) { return 0; }
+static int keyDown[128];
+void runtime_input_key_synthetic(unsigned code, int down) { if (code < 128) keyDown[code] = down; }
+static int runeAim;
+int runtime_rune_aim_live(void) { return runeAim; }
 
 static int failures, checked;
 static void check(int ok, const char *what) { checked++; if (!ok) { failures++; fprintf(stderr, "FAIL: %s\n", what); } }
@@ -50,7 +61,12 @@ int main(int argc, char **argv) { @autoreleasepool {
     runtime_mouse_button(0, 1); s = settle(); check(!s.buttons, "left click while drawing: ZR let go (the shot), no attack");
     runtime_mouse_button(0, 0); s = settle(); check(s.buttons == ZR, "left up, right still held: drawing again");
     runtime_mouse_button(1, 0); runtime_mouse_button(2, 1); s = settle(); check(s.buttons == ZL, "middle button: target (ZL)");
-    runtime_mouse_button(2, 0); runtime_mouse_button(9, 1); s = settle(); check(!s.buttons, "a button number out of range is ignored");
+    runtime_mouse_button(2, 0); runeAim = 1;
+    runtime_mouse_button(0, 1); s = settle(); check(keyDown[38] && !s.buttons, "a rune out (its aiming camera): left button uses it (J, A)");
+    runeAim = 0; runtime_mouse_button(0, 0); s = settle(); check(!keyDown[38] && !s.buttons, "let go as it was pressed, the rune camera gone");
+    runeAim = 1; runtime_mouse_button(1, 1); runtime_mouse_button(0, 1); s = settle(); check(!keyDown[38] && !s.buttons, "drawing the bow (right held): left shoots, not A");
+    runtime_mouse_button(0, 0); runtime_mouse_button(1, 0); runeAim = 0; settle();
+    runtime_mouse_button(9, 1); s = settle(); check(!s.buttons, "a button number out of range is ignored");
 
     runtime_mouse_move(10, 0); mouse_tick(); s = settle();
     check(abs(s.rx - 16384) <= 1 && !s.ry, "10 points right: half the right stick right");
