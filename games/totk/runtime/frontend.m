@@ -141,6 +141,7 @@ __attribute__((constructor)) static void pause_menu_watch(void){   /* a popup op
  pauseWatch=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
  dispatch_source_set_timer(pauseWatch,DISPATCH_TIME_NOW,100*NSEC_PER_MSEC,20*NSEC_PER_MSEC);dispatch_source_set_event_handler(pauseWatch,^{pause_menu_open();});dispatch_resume(pauseWatch);}
 static unsigned escAs,enterAs,eAs,spaceAs,vAs;
+static int mouseLast;   /* the pointer moved since the last key: the frame follows it (title_tick) */
 static int in_menu(void){return runtime_game_world_live&&!runtime_game_world_live();}
 enum{KEY_NONE=255,KEY_SKIP=254};   /* runtime_input_key ignores them; KEY_SKIP: J (A) and I (X) together */
 extern int runtime_title_cursor(void) __attribute__((weak));
@@ -148,6 +149,7 @@ static unsigned space_key(void){int r=space_role(!runtime_game_world_live||runti
  return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
 /* A window key after the settings panel: what it presses depends on where the game is (above). */
 static void front_key_down(unsigned short code,int repeat){
+ if(mouseLast){mouseLast=0;extern void runtime_ui_frame_show(int) __attribute__((weak));if(runtime_ui_frame_show)runtime_ui_frame_show(1);}   /* the keyboard: the frame back */
  if(code==56&&in_menu())return;   /* Shift in a menu: nothing (only Esc goes back) */
  if(code==53){if(!repeat)escAs=esc_is_plus(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,pause_menu_open())?53:56;runtime_input_key(escAs,1);return;}
  if(code==14){if(!repeat)eAs=pause_tabs_open()?59:in_menu()?KEY_NONE:14;runtime_input_key(eAs,1);return;}   /* E in the pause menu: the next tab (R, Control), as Q (L) the one before; A in the world */
@@ -254,6 +256,14 @@ void runtime_menu_pointer(double lx,double ly){dispatch_async(dispatch_get_main_
  NSSize z=window.contentView.bounds.size;double s=fmin(z.width/1280,z.height/720);
  fakePointer=NSMakePoint((z.width-1280*s)/2+(lx+640)*s,(z.height-720*s)/2+(ly+360)*s);fakePointerOn=1;titleFollow=2;});}
 void runtime_menu_wheel(int n){dispatch_async(dispatch_get_main_queue(),^{titleScroll+=n;titleFollow=0;});}   /* tests: "wheel <notches>" */
+/* The title's items are the cursor's elements too (game_patches_botw.c runtime_ui_hits, top to bottom by place): the
+   d-pad press toward the item under the pointer lands on it at once (runtime_ui_select). */
+static void title_select(int item){
+ extern int runtime_ui_hits(MenuHit *,int,int *) __attribute__((weak));extern void runtime_ui_select(uint64_t) __attribute__((weak));
+ if(!runtime_ui_hits||!runtime_ui_select)return;
+ MenuHit h[16];int sel,n=runtime_ui_hits(h,16,&sel);if(n<title_count())return;   /* not the title's items: walked (it has one element more, below them) */
+ for(int i=1;i<n;i++)for(int j=i;j>0&&h[j].y>h[j-1].y;j--){MenuHit t=h[j];h[j]=h[j-1];h[j-1]=t;}
+ if(item>=0&&item<n)runtime_ui_select(h[item].id);}
 static void title_tick(void){   /* main thread, every 8 ms: one d-pad step toward the item under the mouse, the next as soon as the game moved */
  static int waitFrom=-1;static uint64_t waitUntil;
  if(titleKey){runtime_input_key_synthetic(titleKey,0);titleKey=0;return;}   /* the press stays pending until the game reads it */
@@ -271,12 +281,13 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
    [titleCursor set];window.acceptsMouseMovedEvents=YES;}   /* the hover needs moves in a window too */
   [window invalidateCursorRectsForView:window.contentView];
   fprintf(stderr,"[totk] menu pointer: %s\n",mode?(frame?"a menu with the selection frame":titleFree?"free (the world stopped)":"the title menu"):"off");}
- if(!mode){titleScroll=0;return;}
+ if(!mode){titleScroll=0;if(mouseLast){mouseLast=0;extern void runtime_ui_frame_show(int) __attribute__((weak));if(runtime_ui_frame_show)runtime_ui_frame_show(1);}return;}
  if(titleFree){titleScroll=0;if(titleConfirm){titleConfirm=0;titleKey=38;runtime_input_key_synthetic(38,1);}return;}   /* the map, a dialog: a click is A */
  {static NSPoint last;NSPoint m=NSEvent.mouseLocation;   /* the pointer read here too: moves are not always delivered after a screen change */
   if(m.x!=last.x||m.y!=last.y){last=m;titleFollow=2;
    if(!frame){NSView *v=window.contentView;NSPoint p=title_pointer(v);
-    int i=menu_title_item(v.bounds.size.width,v.bounds.size.height,p.x,p.y,title_count());if(i>=0)titleTarget=i;}}}
+    int i=menu_title_item(v.bounds.size.width,v.bounds.size.height,p.x,p.y,title_count());if(i>=0)titleTarget=i;
+    mouseLast=1;extern void runtime_ui_frame_show(int) __attribute__((weak));if(runtime_ui_frame_show)runtime_ui_frame_show(i>=0);}}}   /* the frame only on an item */
  if(frame){   /* a frame menu */
   uint64_t now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   if(menu_frame_small(fr)){   /* the inventory (menu_grid.h): the item slot under the mouse, by the game's own map of the page */
@@ -317,7 +328,9 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
      hfrom[0]=cx;hfrom[1]=cy;hwait=1;huntil=now+150000000ull;titleFollow=0;return;}
     NSView *v=window.contentView;NSPoint p=title_pointer(v);double w=v.bounds.size.width,h=v.bounds.size.height,sc=fmin(w/1280,h/720);
     int target=menu_hit_at(hits,hn,(p.x-(w-1280*sc)/2)/sc-640,(p.y-(h-720*sc)/2)/sc-360);
-    if(titleFollow==2){titleFollow=1;stuck=0;}
+    if(titleFollow==2){titleFollow=1;stuck=0;mouseLast=1;}
+    extern void runtime_ui_frame_show(int) __attribute__((weak));
+    if(runtime_ui_frame_show)runtime_ui_frame_show(!mouseLast||target>=0);   /* the frame only on what the pointer is on */
     if(target<0||hsel<0){titleConfirm=0;return;}   /* nothing under the pointer: nothing at all */
     if(target==hsel){titleFollow=0;stuck=0;if(titleConfirm){titleConfirm=0;titleKey=38;runtime_input_key_synthetic(38,1);}return;}   /* there: a click is A */
     if(stuck>=2){titleConfirm=0;return;}   /* the d-pad does not get there (a tab icon): left alone until the pointer moves */
@@ -345,7 +358,7 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
   titleKey=titleScroll>0?9:5;titleScroll+=titleScroll>0?-1:1;runtime_input_key_synthetic(titleKey,1);
   scrollFrom=cur;scrollUntil=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+150000000ull;titleTarget=-1;return;}
  if(waitFrom>=0){if(cur==waitFrom&&clock_gettime_nsec_np(CLOCK_UPTIME_RAW)<waitUntil)return;waitFrom=-1;}   /* the last step not shown yet */
- if(titleFollow&&titleTarget>=0&&titleTarget!=cur){titleKey=titleTarget>cur?9:5;runtime_input_key_synthetic(titleKey,1);   /* V: d-pad down, G: up */
+ if(titleFollow&&titleTarget>=0&&titleTarget!=cur){titleKey=titleTarget>cur?9:5;title_select(titleTarget);runtime_input_key_synthetic(titleKey,1);   /* V: d-pad down, G: up */
   waitFrom=cur;waitUntil=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+150000000ull;}
  else if(titleConfirm&&titleTarget==cur){titleConfirm=0;titleKey=38;runtime_input_key_synthetic(38,1);}   /* J: A */
 }

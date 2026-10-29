@@ -2103,11 +2103,36 @@ static void key_icons_start(void) {
    frame's owner), its fields, and its list of selectable elements (node at +8: prev, next) walked from the selected one
    (+0x48): in each element, every layout pane (a name at +0xb8) within 0x800 bytes, with its global place (+0x7c, +0x8c),
    size (+0x50) and flags (+0x58). */
+int runtime_ui_hits(MenuHit *out, int max, int *selected);
 void botw_uilist(void) {
     uint64_t obj = cursor_object(), sel = 0; uint64_t f[16];
     if (!obj) { fprintf(stderr, "[uilist] no cursor object\n"); return; }
     if (camdump_read(obj, f, sizeof f)) for (int i = 0; i < 16; i++) fprintf(stderr, "[uilist] obj+%02x %016llx\n", i * 8, (unsigned long long)f[i]);
     float at[2]; if (camdump_read(obj + 0x58, at, 8)) fprintf(stderr, "[uilist] cursor at %g %g\n", at[0], at[1]);
+    { uint64_t p = title_pane();   /* the frame's corner and its parents (+0x18?) */
+      for (int i = 0; i < 5 && p; i++) { char nm[25] = {0}; uint8_t fl[4] = {0}; camdump_read(p + 0xb8, nm, 24); camdump_read(p + 0x58, fl, 4);
+          fprintf(stderr, "[uilist] frame pane %d %#llx %s flags %02x alpha %u\n", i, (unsigned long long)p, nm, fl[0], fl[2]);
+          uint64_t q = 0; if (!camdump_read(p + 0x18, &q, 8)) break; p = q; } }
+    { uint64_t a20 = 0, a80 = 0, gm = 0, gr = 0, fp = 0; int32_t c = 0, end = 0; int8_t f[8] = {0};
+      camdump_read(obj + 0x20, &a20, 8); camdump_read(a20 + 0x80, &a80, 8); camdump_read(a80 + 0x28, &gm, 8);
+      camdump_read(gm + 0x28, &c, 4); camdump_read(gm + 0x30, &gr, 8); camdump_read(gm + 0x38, &end, 4); camdump_read(gm + 0x40, &fp, 8); camdump_read(fp, f, 8);
+      fprintf(stderr, "[uilist] groups: +20 %#llx +80 %#llx gm %#llx count %d arr %#llx end %d flags %d %d %d %d %d %d\n", (unsigned long long)a20, (unsigned long long)a80,
+              (unsigned long long)gm, c, (unsigned long long)gr, end, f[0], f[1], f[2], f[3], f[4], f[5]);
+      int8_t ff[128]; if (c > 0 && c <= 128 && camdump_read(fp, ff, (size_t)c)) for (int g = 0; g < c; g++) { if (ff[g] < 0) continue;
+          uint64_t grp = 0, node = 0, ctl = 0, pane = 0; int32_t off = 0; int k = 0; float xy[2] = {0}; char nm[17] = {0};
+          camdump_read(gr + 8 * (uint64_t)g, &grp, 8); camdump_read(grp + 0x90, &node, 8); camdump_read(grp + 0x9c, &off, 4);
+          if (node && node != grp + 0x88 && camdump_read(node - (uint64_t)(int64_t)off + 0x18, &ctl, 8) && camdump_read(ctl + 0x60, &pane, 8)) { camdump_read(pane + 0x7c, xy, 4); camdump_read(pane + 0x8c, xy + 1, 4); camdump_read(pane + 0xb8, nm, 16); }
+          for (uint64_t q = node; q && q != grp + 0x88 && k < 400; k++) if (!camdump_read(q + 8, &q, 8)) break;
+          fprintf(stderr, "[uilist] group %d flag %d: %d elements, first %s at %g %g\n", g, ff[g], k, nm, xy[0], xy[1]); } }
+    { MenuHit h[64]; int sel = -1, n = runtime_ui_hits(h, 64, &sel);
+      for (int i = 0; i < n; i++) {
+          fprintf(stderr, "[uilist] hit %d %g %g %gx%g%s\n", i, h[i].x, h[i].y, h[i].w, h[i].h, i == sel ? " (selected)" : "");
+          uint64_t ctl = 0, pane = 0; static uint8_t b[0x900];
+          if (i < 12 && camdump_read(h[i].id + 0x18, &ctl, 8) && camdump_read(ctl + 0x60, &pane, 8) && camdump_read(pane, b, sizeof b))
+              for (size_t o = 0; o + 0xc8 <= sizeof b; o += 8) { const char *nm = (const char *)b + o + 0xb8;
+                  if ((nm[0] == 'N' || nm[0] == 'B' || nm[0] == 'P') && nm[1] == '_' ) { float px, py; memcpy(&px, b + o + 0x7c, 4); memcpy(&py, b + o + 0x8c, 4);
+                      fprintf(stderr, "[uilist]      +%03zx %.12s %g %g flags %02x\n", o, nm, px, py, b[o + 0x58]); } }
+      } }
     if (!camdump_read(obj + 0x48, &sel, 8) || !sel) return;
     int n = 0;
     for (int dir = 0; dir < 2; dir++) {
@@ -2137,36 +2162,50 @@ void botw_uilist(void) {
 /* The hit boxes of the menu on screen (menu_grid.h MenuHit, frontend.m): the cursor object's elements (botw_uilist),
    each by its button pane, the one the game puts the cursor on (element +0x18, +0x60: main+0x134e95c), global place
    (+0x7c, +0x8c), size (+0x50) times the global scale (+0x70, +0x84), or the size of its bounding pane B_Hit_* (the
-   touch area, at the same place in the panes after it); the selected one is at the cursor's place. Only shown ones (visible flag 0x01 at +0x58) on the screen, and no empty inventory slot (its
+   touch area, at the same place in the panes after it); the selected one is at the cursor's place. Only shown ones (visible flag 0x01 at +0x58), and no empty inventory slot (its
    N_Born_00 hidden: flag 0x80). Returns how many, *selected the selected element's index (-1 if it has none); 0: no menu. */
 int runtime_ui_hits(MenuHit *out, int max, int *selected) {
     *selected = -1;
-    uint64_t obj = cursor_object(), sel = 0;
-    if (!obj || !camdump_read(obj + 0x48, &sel, 8) || !sel) return 0;
+    /* The groups the d-pad step looks through (main+0x134e654..0x134e924): the cursor's group set (+0x20, +0x80, +0x28):
+       count +0x28, groups +0x30, first-past-active +0x38, a signed byte per group +0x40 (negative: left out); from
+       the first group not left out up to the first one at or past +0x38 not left out. A group's elements: a list with
+       its sentinel at +0x88, first node +0x90, the node's offset in an element +0x9c (next: node +8). A popup is a
+       group of its own and the page behind it stays active (2026-10-29: the pointer off the popup took an item behind
+       it), so only the group of the selected element (+0x48) counts. */
+    uint64_t obj = cursor_object(), a20 = 0, a80 = 0, gm = 0, groups = 0, flagsp = 0, sel = 0; int32_t count = 0, end = 0;
+    if (!obj || !camdump_read(obj + 0x48, &sel, 8) || !sel || !camdump_read(obj + 0x20, &a20, 8) || !camdump_read(a20 + 0x80, &a80, 8) || !camdump_read(a80 + 0x28, &gm, 8) ||
+        !camdump_read(gm + 0x28, &count, 4) || !camdump_read(gm + 0x30, &groups, 8) || !camdump_read(gm + 0x38, &end, 4) ||
+        !camdump_read(gm + 0x40, &flagsp, 8) || count <= 0 || count > 128) return 0;
+    int8_t fl[128]; if (!camdump_read(flagsp, fl, (size_t)count)) return 0;
+    int first = 0; while (first < count && fl[first] < 0) first++;
+    while (end < count && fl[end] < 0) end++;
     int n = 0;
-    for (int dir = 0; dir < 2; dir++) {
-        uint64_t e = sel;
-        for (int k = 0; k < 300 && n < max; k++) {
-            if (dir == 0 || k > 0) {
-                uint64_t ctl = 0, pane = 0; static uint8_t body[0x900];   /* the element's button pane: element +0x18, +0x60 */
-                if (camdump_read(e + 0x18, &ctl, 8) && ctl && camdump_read(ctl + 0x60, &pane, 8) && pane && camdump_read(pane, body, sizeof body)) {
-                    float x, y, sz[2], m00, m11; memcpy(&x, body + 0x7c, 4); memcpy(&y, body + 0x8c, 4); memcpy(sz, body + 0x50, 8);
-                    memcpy(&m00, body + 0x70, 4); memcpy(&m11, body + 0x84, 4);
-                    float w = sz[0] * fabsf(m00), h = sz[1] * fabsf(m11); int empty = 0;
-                    for (size_t o = 8; o + 0xb8 + 16 <= sizeof body; o += 8) {   /* its parts after it: the hit box, the item mark */
-                        float px, py; memcpy(&px, body + o + 0x7c, 4); memcpy(&py, body + o + 0x8c, 4);
-                        if (fabsf(px - x) > 1 || fabsf(py - y) > 1) continue;
-                        if (!memcmp(body + o + 0xb8, "B_Hit_", 6)) { float hs[2], a00, a11; memcpy(hs, body + o + 0x50, 8); memcpy(&a00, body + o + 0x70, 4); memcpy(&a11, body + o + 0x84, 4); w = hs[0] * fabsf(a00); h = hs[1] * fabsf(a11); }
-                        if (!memcmp(body + o + 0xb8, "N_Born_00", 10) && !(body[o + 0x58] & 0x80)) empty = 1;   /* an inventory slot with no item */
-                    }
-                    if ((body[0x58] & 1) && !empty && fabsf(x) <= 640 && fabsf(y) <= 360) out[n++] = (MenuHit){ x, y, w, h, e };
+    for (int g = first; g < end && n < max; g++) {
+        if (fl[g] < 0) continue;
+        uint64_t grp = 0, node = 0; int32_t off = 0;
+        if (!camdump_read(groups + 8 * (uint64_t)g, &grp, 8) || !camdump_read(grp + 0x90, &node, 8) || !camdump_read(grp + 0x9c, &off, 4)) continue;
+        int start = n, mine = 0;
+        for (int k = 0; k < 300 && n < max && node && node != grp + 0x88; k++) {
+            uint64_t e = node - (uint64_t)(int64_t)off; mine |= e == sel;
+            /* the element's pane (+0x18, +0x60: the hit box B_Hit_00 in the inventory and the log) and the panes around it
+               at the same place: the hit box, and N_Born_00 (before it) without flag 0x80 for an empty inventory slot */
+            enum { BEFORE = 0x400 }; uint64_t ctl = 0, pane = 0; static uint8_t win[0xc00];
+            if (camdump_read(e + 0x18, &ctl, 8) && ctl && camdump_read(ctl + 0x60, &pane, 8) && pane > BEFORE && camdump_read(pane - BEFORE, win, sizeof win)) {
+                const uint8_t *body = win + BEFORE;
+                float x, y, sz[2], m00, m11; memcpy(&x, body + 0x7c, 4); memcpy(&y, body + 0x8c, 4); memcpy(sz, body + 0x50, 8);
+                memcpy(&m00, body + 0x70, 4); memcpy(&m11, body + 0x84, 4);
+                float w = sz[0] * fabsf(m00), h = sz[1] * fabsf(m11); int empty = 0;
+                for (size_t o = 0; o + 0xb8 + 16 <= sizeof win; o += 8) {
+                    float px, py; memcpy(&px, win + o + 0x7c, 4); memcpy(&py, win + o + 0x8c, 4);
+                    if (o == BEFORE || fabsf(px - x) > 1 || fabsf(py - y) > 1) continue;
+                    if (o > BEFORE && !memcmp(win + o + 0xb8, "B_Hit_", 6)) { float hs[2], a00, a11; memcpy(hs, win + o + 0x50, 8); memcpy(&a00, win + o + 0x70, 4); memcpy(&a11, win + o + 0x84, 4); w = hs[0] * fabsf(a00); h = hs[1] * fabsf(a11); }
+                    if (!memcmp(win + o + 0xb8, "N_Born_00", 10) && !(win[o + 0x58] & 0x80)) empty = 1;
                 }
+                if ((body[0x58] & 1) && !empty) out[n++] = (MenuHit){ x, y, w, h, e };
             }
-            uint64_t node[2]; if (!camdump_read(e + 8, node, sizeof node)) break;
-            uint64_t nx = dir == 0 ? node[1] : node[0];
-            if (!nx || nx - 8 == sel) break;
-            e = nx - 8;
+            if (!camdump_read(node + 8, &node, 8)) break;
         }
+        if (!mine) n = start;   /* only the selected element's group: the popup's, not the page behind it */
     }
     float at[2];   /* the selected one: where the cursor is (+0x58, its button's place; +0x48 is not always it) */
     if (camdump_read(obj + 0x58, at, sizeof at))
@@ -2192,4 +2231,13 @@ static void ui_nav_install(Module *m) {
     uint32_t w; memcpy(&w, m->base + UI_NAV_SITE, 4);
     if (w == UI_NAV_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d9u << 5); memcpy(m->base + UI_NAV_SITE, &b, 4); g_nav_main = m->base; }
     fprintf(stderr, "[botw] menu hover: the cursor's d-pad step %s\n", g_nav_main ? "hooked" : "not hooked");
+}
+
+/* The selection frame shown or not (user 2026-10-29: the frame only on what the pointer is on, nothing otherwise): the
+   frame's part Pa_Cursor_00, the parent (+0x18) of its corner's parent, its visible flag (bit 0 of +0x58). */
+void runtime_ui_frame_show(int show) {
+    uint64_t p = title_pane(), q = 0; char nm[16] = {0}; uint8_t fl;
+    if (!p || !camdump_read(p + 0x18, &q, 8) || !q || !camdump_read(q + 0x18, &p, 8) || !p || !camdump_read(p + 0xb8, nm, 13) || memcmp(nm, "Pa_Cursor_00", 13) || !camdump_read(p + 0x58, &fl, 1)) return;
+    uint8_t want = show ? (fl | 1) : (fl & ~1);
+    if (want != fl) *(volatile uint8_t *)(uintptr_t)(p + 0x58) = want;
 }
