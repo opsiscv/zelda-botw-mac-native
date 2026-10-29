@@ -18,7 +18,7 @@ Sem isto não dá para compilar. Tudo vem do seu próprio Switch:
 Requisitos: macOS em Apple Silicon, Xcode completo, Python 3.14. O README principal explica as dependências.
 
 ```sh
-git clone https://github.com/opsiscv/botw-mac-native.git ~/Games/MacNativeGames-BOTW
+git clone https://github.com/opsiscv/zelda-botw-mac-native.git ~/Games/MacNativeGames-BOTW
 cd ~/Games/MacNativeGames-BOTW && git checkout thiago-botw
 
 G="$HOME/Downloads/Games/Zelda BOTW"; W="$G/basegame/BotW_build"
