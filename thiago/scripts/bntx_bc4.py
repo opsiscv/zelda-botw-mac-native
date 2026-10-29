@@ -84,3 +84,20 @@ def encode(font, img):
             lin += block if bc4_decode_block(block) == px else bc4_encode_block(px)
     out = bytearray(font); out[off:off + size] = swizzle(bytes(lin), w // 4, h // 4, 8, bh, size)
     return bytes(out)
+
+
+def textures(bntx):
+    """name -> (data offset, size, width, height, block height, format) of each texture of a BNTX (level 0)."""
+    count, = struct.unpack_from('<I', bntx, 0x24); arr, = struct.unpack_from('<Q', bntx, 0x28); out = {}
+    for i in range(count):
+        t, = struct.unpack_from('<Q', bntx, arr + 8 * i)
+        fmt, = struct.unpack_from('<I', bntx, t + 0x1c); w, h = struct.unpack_from('<II', bntx, t + 0x24)
+        bh = 1 << struct.unpack_from('<I', bntx, t + 0x34)[0]
+        name_at, = struct.unpack_from('<Q', bntx, t + 0x60); n, = struct.unpack_from('<H', bntx, name_at)
+        mips, = struct.unpack_from('<Q', bntx, t + 0x70); off, = struct.unpack_from('<Q', bntx, mips)
+        out[bntx[name_at + 2:name_at + 2 + n].decode()] = (off, w, h, bh, fmt)
+    return out
+
+
+def r8_size(w, h, bh):   # bytes of a block-linear R8 level: whole GOB columns and blocks
+    return -(-w // GOB_W) * GOB_W * -(-h // (GOB_H * bh)) * GOB_H * bh

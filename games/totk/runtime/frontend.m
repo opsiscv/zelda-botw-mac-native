@@ -133,16 +133,23 @@ extern int runtime_inventory_slots(MenuSlot *,int,int *) __attribute__((weak));
 extern int runtime_quest_log_live(void) __attribute__((weak));
 /* The pause menu's inventory or Adventure Log is open (the System tab has no sign here: from it Q goes back). */
 static int pause_tabs_open(void){if(runtime_game_world_live&&runtime_game_world_live())return 0;if(runtime_quest_log_live&&runtime_quest_log_live())return 1;MenuSlot slots[MENU_SLOTS_MAX];int sel;return runtime_inventory_slots&&runtime_inventory_slots(slots,MENU_SLOTS_MAX,&sel)>0;}
+/* In the pause menu: its tabs were seen since the world last went on (inside it, in the item popup or while rotating
+   Link, the tabs have no sign, and nothing else stops the world there). */
+static int pause_menu_open(void){static int open;if(runtime_game_world_live&&runtime_game_world_live())open=0;else if(pause_tabs_open())open=1;return open;}
+static dispatch_source_t pauseWatch;
+__attribute__((constructor)) static void pause_menu_watch(void){   /* a popup opened with a click, before any key: still seen */
+ pauseWatch=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+ dispatch_source_set_timer(pauseWatch,DISPATCH_TIME_NOW,100*NSEC_PER_MSEC,20*NSEC_PER_MSEC);dispatch_source_set_event_handler(pauseWatch,^{pause_menu_open();});dispatch_resume(pauseWatch);}
 static unsigned escAs,enterAs,eAs,spaceAs,vAs;
 static int in_menu(void){return runtime_game_world_live&&!runtime_game_world_live();}
 enum{KEY_NONE=255,KEY_SKIP=254};   /* runtime_input_key ignores them; KEY_SKIP: J (A) and I (X) together */
 extern int runtime_title_cursor(void) __attribute__((weak));
-static unsigned space_key(void){int r=space_role(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,pause_tabs_open());
+static unsigned space_key(void){int r=space_role(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,pause_menu_open());
  return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
 /* A window key after the settings panel: what it presses depends on where the game is (above). */
 static void front_key_down(unsigned short code,int repeat){
  if(code==56&&in_menu())return;   /* Shift in a menu: nothing (only Esc goes back) */
- if(code==53){if(!repeat)escAs=esc_is_plus(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,pause_tabs_open())?53:56;runtime_input_key(escAs,1);return;}
+ if(code==53){if(!repeat)escAs=esc_is_plus(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,pause_menu_open())?53:56;runtime_input_key(escAs,1);return;}
  if(code==14){if(!repeat)eAs=pause_tabs_open()?59:in_menu()?KEY_NONE:14;runtime_input_key(eAs,1);return;}   /* E in the pause menu: the next tab (R, Control), as Q (L) the one before; A in the world */
  if(code==9){if(!repeat)vAs=pause_tabs_open()?32:9;runtime_input_key(vAs,1);return;}   /* V in the inventory: sort (Y, U; the left click is A there); the d-pad's down elsewhere */
  if(code==49){if(!repeat){spaceAs=space_key();fprintf(stderr,"[totk-input] Space: %s\n",spaceAs==KEY_SKIP?"A and X (cutscene, dialog)":spaceAs==38?"A (menu)":"X (world)");}if(spaceAs==KEY_SKIP){runtime_input_key(38,1);runtime_input_key(34,1);}else runtime_input_key(spaceAs,1);return;}   /* space_skip.h */

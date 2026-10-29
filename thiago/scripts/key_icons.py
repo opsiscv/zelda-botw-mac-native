@@ -10,7 +10,7 @@ import struct, sys
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 import bntx_bc4
-from nx import yaz0_decode, yaz0_encode, sarc_files
+from nx import yaz0_decode, yaz0_encode, yaz0_patch, sarc_files, sarc_replace
 
 DATA = Path.home()/'Library/Application Support/MacNativeGames/BotW'
 ROMFS = Path.home()/'Downloads/Games/Zelda BOTW/basegame/BotW_build/totk/extracted/botw160/romfs'
@@ -20,9 +20,11 @@ FONT = 'External_00.bffnt'
 # The key behind each Switch button with no keys.txt (world context); ZR has no key (the right mouse button).
 DEFAULT = {'a': 'e', 'b': 'shift', 'x': 'space', 'y': 'u', 'l': 'q', 'r': 'ctrl', 'zl': 'caps', 'zr': None,
            'plus': 'esc', 'minus': 'tab', 'lstick': 'z', 'rstick': 'c', 'dpad_left': 'f', 'dpad_up': 'g',
-           'dpad_right': 'b', 'dpad_down': 'v', 'move_up': 'w', 'move_left': 'a', 'move_down': 's', 'move_right': 'd'}
+           'dpad_right': 'b', 'dpad_down': 'v', 'move_up': 'w', 'move_left': 'a', 'move_down': 's', 'move_right': 'd',
+           'look_up': 'up', 'look_left': 'left', 'look_down': 'down', 'look_right': 'right'}
 # In a menu (the world stopped: dialogs, the pause menu; runtime/frontend.m) these buttons come from other keys: the
-# left click confirms (A), Esc goes back (B), E is the next tab (R), V sorts (Y).
+# left click confirms (A), Esc goes back (B), E is the next tab (R), V sorts (Y). The right stick (rotating Link) is the
+# arrow keys there: the mouse moves the pointer.
 MENU = {'a': 'mouse_left', 'b': 'esc', 'r': 'e', 'y': 'v'}
 CONTROLS_NAMES = {'left': 'dpad_left', 'up': 'dpad_up', 'right': 'dpad_right', 'down': 'dpad_down'}
 MOUSE = ('mouse_left', 'mouse_right', 'mouse_middle')   # the side buttons only repeat keys: not shown
@@ -67,13 +69,23 @@ def cap(d, box, key):
     """A keycap filling box with its label cut out of it."""
     x0, y0, x1, y1 = box
     d.rounded_rectangle(box, radius=(y1 - y0) // 4, fill=255)
-    text = SYMBOLS.get(key) or WORDS.get(key) or key.upper()
+    if key in SYMBOLS: return arrow_hole(d, box, key)
+    text = WORDS.get(key) or key.upper()
     px = int((y1 - y0) * 0.72)
     while True:
         f = font(text, px); l, t, r, b = d.textbbox((0, 0), text, font=f)
         if r - l <= (x1 - x0) * 0.82 and b - t <= (y1 - y0) * 0.72 or px < 8: break
         px -= SS
     d.text(((x0 + x1 - (r - l)) / 2 - l, (y0 + y1 - (b - t)) / 2 - t), text, font=f, fill=0)
+
+
+def arrow_hole(d, box, way):
+    x0, y0, x1, y1 = box; cx, cy, a = (x0 + x1) / 2, (y0 + y1) / 2, (y1 - y0) * 0.26
+    tri = {'up': [(cx - a, cy + a * 0.6), (cx + a, cy + a * 0.6), (cx, cy - a * 0.8)],
+           'down': [(cx - a, cy - a * 0.6), (cx + a, cy - a * 0.6), (cx, cy + a * 0.8)],
+           'left': [(cx + a * 0.6, cy - a), (cx + a * 0.6, cy + a), (cx - a * 0.8, cy)],
+           'right': [(cx - a * 0.6, cy - a), (cx - a * 0.6, cy + a), (cx + a * 0.8, cy)]}[way]
+    d.polygon(tri, fill=0)
 
 
 def mouse(d, box, button=None, arrow=None):
@@ -123,10 +135,15 @@ def one(key, mouse_arrow=None):
         if key in MOUSE: mouse(d, box, key, mouse_arrow)
         else: cap(d, box, key)
     draw.wide = key in WORDS   # a word: the whole cell's width (the glyph's width in CWDH grows to it)
+    draw.kind = 'mouse' if key in MOUSE else 'keys'
     return draw if key else None
 
 
-def glyphs(k):
+def kind(f, name):
+    f.kind = name; return f
+
+
+def glyphs(k, menu=False):
     """Glyph index (zeldaret-free: the order of the font's character map, 0 = U+E040) -> how to draw it."""
     mv = (k['move_up'], k['move_left'], k['move_down'], k['move_right'])
     dp = (k['dpad_up'], k['dpad_left'], k['dpad_down'], k['dpad_right'])
@@ -140,9 +157,16 @@ def glyphs(k):
     if all(dp): g[9] = lambda d, b: cluster(d, b, *dp)
     if k['dpad_up'] and k['dpad_down']: g[32] = lambda d, b: pair(d, b, k['dpad_up'], k['dpad_down'], vertical=True)
     if k['dpad_left'] and k['dpad_right']: g[33] = lambda d, b: pair(d, b, k['dpad_left'], k['dpad_right'])
-    # The right stick is the camera: the mouse moved.
-    for i, way in ((27, None), (14, 'down'), (16, 'up'), (22, 'right'), (24, 'left'), (18, 'leftright'), (25, 'updown')):
-        g[i] = (lambda w: lambda d, b: mouse(d, b, None, w))(way)
+    # The right stick is the camera: the mouse moved; in a menu (rotating Link) the arrow keys.
+    lk = (k['look_up'], k['look_left'], k['look_down'], k['look_right'])
+    if menu:
+        g.update({27: all(lk) and kind(lambda d, b: cluster(d, b, *lk), 'keys'), 14: one(k['look_down']), 16: one(k['look_up']),
+                  22: one(k['look_right']), 24: one(k['look_left']),
+                  18: k['look_left'] and k['look_right'] and kind(lambda d, b: pair(d, b, k['look_left'], k['look_right']), 'keys'),
+                  25: k['look_up'] and k['look_down'] and kind(lambda d, b: pair(d, b, k['look_up'], k['look_down'], vertical=True), 'keys')})
+    else:
+        for i, way in ((27, None), (14, 'down'), (16, 'up'), (22, 'right'), (24, 'left'), (18, 'leftright'), (25, 'updown')):
+            g[i] = kind((lambda w: lambda d, b: mouse(d, b, None, w))(way), 'mouse')
     return {i: f for i, f in g.items() if f}
 
 
@@ -187,6 +211,47 @@ def preview(img, path):
     out.resize((out.width * 2, out.height * 2), Image.LANCZOS).save(path)
 
 
+def romfs_file(path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]/'games/totk/scripts'))
+    import make_mod_manifest as m
+    o, s = m.read_index(ROMFS/'runtime-index.bin')[path]
+    with open(ROMFS/'romfs.bin', 'rb') as rom:
+        rom.seek(o); return rom.read(s)
+
+
+# The HUD's own button pictures (Pack/Bootup.pack > Layout/Common.sblarc > timg/__Combined.bntx, R8 48x48: "A Mount",
+# "X Jump"...), drawn as the font's glyph of the same button. The world's keys: the HUD is the world's.
+HUD = {'Nt_KeyTexA_00^d': 0, 'Nt_KeyTexB_00^d': 1, 'Nt_KeyTexX_00^d': 2, 'Nt_KeyTexY_00^d': 3, 'Nt_KeyTexL_00^d': 4,
+       'Nt_KeyTexZL_00^d': 6, 'Nt_KeyTexLSt_00^d': 15, 'Nt_KeyTexLSt_01^d': 26}
+PACK, LAYOUT, BNTX = 'Pack/Bootup.pack', 'Layout/Common.sblarc', 'timg/__Combined.bntx'
+
+
+def hud_pack(draws):
+    """Bootup.pack with the HUD's button pictures redrawn (only their bytes recompressed: nx.yaz0_patch)."""
+    pack = romfs_file(PACK); layout = {n: (a, e) for n, a, e in sarc_files(pack)}[LAYOUT]
+    c = pack[layout[0]:layout[1]]; d = bytearray(yaz0_decode(c))
+    a, e = {n: (a, e) for n, a, e in sarc_files(d)}[BNTX]; tex = bntx_bc4.textures(d[a:e]); changed = []
+    for name, glyph in HUD.items():
+        if glyph not in draws: continue
+        off, w, h, bh, fmt = tex[name]; assert fmt >> 8 == 2, f'{name}: not R8'
+        at = a + off; size = bntx_bc4.r8_size(w, h, bh)
+        px = bntx_bc4.deswizzle(d[at:at + size], w, h, 1, bh)
+        xs = [x for y in range(h) for x in range(w) if px[y * w + x] > 40]; ys = [y for y in range(h) for x in range(w) if px[y * w + x] > 40]
+        box = (min(xs), min(ys), max(xs) + 1, max(ys) + 1)
+        if getattr(draws[glyph], 'wide', False): box = (1, box[1], w - 1, box[3])
+        big = Image.new('L', (w * SS, h * SS), 0); draws[glyph](ImageDraw.Draw(big), tuple(v * SS for v in box))
+        d[at:at + size] = bntx_bc4.swizzle(big.resize((w, h), Image.LANCZOS).tobytes(), w, h, 1, bh, size)
+        changed.append((at, at + size))
+    c2 = yaz0_patch(c, bytes(d), changed); assert yaz0_decode(c2) == bytes(d)
+    return sarc_replace(pack, LAYOUT, c2)
+
+
+def write_mod_file(path, data):
+    dst = OUT/path
+    if dst.exists() and dst.read_bytes() == data: print(path, 'unchanged')   # left alone: a running game checks its mod files
+    else: dst.parent.mkdir(parents=True, exist_ok=True); dst.write_bytes(data); print(path, 'written (run the manifest again)')
+
+
 def swapped_sheet(fnt):
     """The font's sheet as stored (swizzled BC4): what the runtime looks for in the game's memory and replaces."""
     off, size, *_ = bntx_bc4.sheet(fnt)
@@ -198,7 +263,7 @@ def main():
     import make_mod_manifest as m
     read = lambda p: p.read_text() if p.exists() else ''
     keys, controls = read(DATA/'keys.txt'), read(DATA/'controls.txt')
-    world, menu = glyphs(labels(keys, controls)), glyphs(labels(keys, controls, menu=True))
+    world, menu = glyphs(labels(keys, controls)), glyphs(labels(keys, controls, menu=True), menu=True)
     print('icons:', labels(keys, controls)); print('in menus:', labels(keys, controls, menu=True))
     wide = sorted({i for d in (world, menu) for i, f in d.items() if getattr(f, 'wide', False)})
     for d in (world, menu):   # a glyph is as wide in both (its width is in the font data, not the sheet)
@@ -215,9 +280,9 @@ def main():
         img2 = bntx_bc4.decode(fnt); redraw(img2, menu); pair = (swapped_sheet(out), swapped_sheet(bntx_bc4.encode(fnt, img2)))
         if pair not in pairs: pairs.append(pair)
         arc[a:e] = out   # the same size: the archive's layout holds
-        dst = OUT/path; data = yaz0_encode(bytes(arc))
-        if dst.exists() and dst.read_bytes() == data: print(path, 'unchanged')   # left alone: a running game checks its mod files
-        else: dst.parent.mkdir(parents=True, exist_ok=True); dst.write_bytes(data); print(path, 'written (run the manifest again)'); shown = shown or (img, img2)
+        write_mod_file(path, yaz0_encode(bytes(arc)))
+        shown = shown or (img, img2)
+    write_mod_file(PACK, hud_pack(world))
     # key_icons.bin (runtime/game_patches_botw.c): the menu sheet swapped in while the world is stopped.
     size = len(pairs[0][0])
     (DATA/'key_icons.bin').write_bytes(b'KICO' + struct.pack('<II', len(pairs), size) + b''.join(w + m for w, m in pairs))

@@ -65,7 +65,8 @@ python3 games/totk/scripts/make_mod_manifest.py "$HOME/Library/Application Suppo
 
 Os ícones trocam sozinhos entre o mundo e os menus: o script grava também `key_icons.bin` (as duas versões da imagem),
 e o app copia a do menu por cima quando o mundo para (no menu: clique esquerdo seleciona, Esc volta, E vai para a próxima
-aba, V ordena). Testes: `python3 -m unittest test_key_icons` em `thiago/scripts`.
+aba, V ordena, as setas giram o Link). Os balões do mundo ("A Mount", "X Jump") são imagens da interface
+(`Pack/Bootup.pack` > `Layout/Common.sblarc`): o script também os redesenha, recomprimindo só os bytes trocados. Testes: `python3 -m unittest test_key_icons` em `thiago/scripts`.
 
 ## Armas inquebráveis
 
