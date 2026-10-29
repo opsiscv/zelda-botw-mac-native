@@ -2162,7 +2162,8 @@ void botw_uilist(void) {
 /* The hit boxes of the menu on screen (menu_grid.h MenuHit, frontend.m): the cursor object's elements (botw_uilist),
    each by its button pane, the one the game puts the cursor on (element +0x18, +0x60: main+0x134e95c), global place
    (+0x7c, +0x8c), size (+0x50) times the global scale (+0x70, +0x84), or the size of its bounding pane B_Hit_* (the
-   touch area, at the same place in the panes after it); the selected one is at the cursor's place. Only shown ones (visible flag 0x01 at +0x58), and no empty inventory slot (its
+   touch area, at the same place in the panes after it); the selected one is at the cursor's place. Only shown ones (visible flag 0x01 at +0x58, alpha +0x5a not 0, and so are all its parents: a closed dialog's
+   buttons are hidden by its root), and no empty inventory slot (its
    N_Born_00 hidden: flag 0x80). Returns how many, *selected the selected element's index (-1 if it has none); 0: no menu. */
 int runtime_ui_hits(MenuHit *out, int max, int *selected) {
     *selected = -1;
@@ -2202,14 +2203,27 @@ int runtime_ui_hits(MenuHit *out, int max, int *selected) {
                     if (o > BEFORE && !memcmp(win + o + 0xb8, "B_Hit_", 6)) { float hs[2], a00, a11; memcpy(hs, win + o + 0x50, 8); memcpy(&a00, win + o + 0x70, 4); memcpy(&a11, win + o + 0x84, 4); w = hs[0] * fabsf(a00); h = hs[1] * fabsf(a11); }
                     if (!memcmp(win + o + 0xb8, "N_Born_00", 10) && !(win[o + 0x58] & 0x80)) empty = 1;
                 }
-                if ((body[0x58] & 1) && !empty) out[n++] = (MenuHit){ x, y, w, h, e };
+                int shown = (body[0x58] & 1) && body[0x5a];   /* it and every parent (+0x18): visible (flag 0x01) and not see-through */
+                uint64_t up = 0; camdump_read(pane + 0x18, &up, 8);
+                for (int k = 0; shown && up && k < 24; k++) {
+                    uint8_t f[3] = {0}; char nm[8] = {0}; if (!camdump_read(up + 0x58, f, 3)) break; shown = (f[0] & 1) && f[2];
+                    if (shown && camdump_read(up + 0xb8, nm, 6) && !memcmp(nm, "N_Cut", 5)) {   /* a list's clip area: rows scrolled out of it are not on screen */
+                        float c[2], cs[2], c00, c11; camdump_read(up + 0x7c, c, 4); camdump_read(up + 0x8c, c + 1, 4); camdump_read(up + 0x50, cs, 8); camdump_read(up + 0x70, &c00, 4); camdump_read(up + 0x84, &c11, 4);
+                        float hw = cs[0] * fabsf(c00) / 2, hh = cs[1] * fabsf(c11) / 2, x0 = fmaxf(x - w / 2, c[0] - hw), x1 = fminf(x + w / 2, c[0] + hw), y0 = fmaxf(y - h / 2, c[1] - hh), y1 = fminf(y + h / 2, c[1] + hh);
+                        if (x1 - x0 < w / 2 || y1 - y0 < h / 2) shown = 0;   /* mostly outside: left out */
+                        else { x = (x0 + x1) / 2; y = (y0 + y1) / 2; w = x1 - x0; h = y1 - y0; }   /* partly: the visible part */
+                    }
+                    if (!camdump_read(up + 0x18, &up, 8)) break;
+                }
+                if (shown && !empty) out[n++] = (MenuHit){ x, y, w, h, e };
             }
             if (n > before && have_at && fabsf(out[n - 1].x - at[0]) < 3 && fabsf(out[n - 1].y - at[1]) < 3) mine = 1;   /* the frame is on it */
             if (!camdump_read(node + 8, &node, 8)) break;
         }
         if (!mine) n = start;   /* only the selected element's group: the popup's, not the page behind it */
     }
-    if (have_at)
+    for (int i = 0; sel && i < n; i++) if (out[i].id == sel) { *selected = i; break; }   /* the selected element, or where the frame is */
+    if (*selected < 0 && have_at)
         for (int i = 0; i < n; i++) if (fabsf(out[i].x - at[0]) < 3 && fabsf(out[i].y - at[1]) < 3) { *selected = i; break; }
     return n;
 }

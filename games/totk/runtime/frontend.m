@@ -321,7 +321,7 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
       the wheel does nothing here (the arrow keys turn the tabs) */
    extern int runtime_ui_hits(MenuHit *,int,int *) __attribute__((weak));
    extern int runtime_ui_nav_hooked(void) __attribute__((weak));
-   static MenuHit hits[MENU_SLOTS_MAX];static int hwait;static uint64_t huntil;
+   static MenuHit hits[MENU_SLOTS_MAX];static int hwait;static uint64_t huntil,hasked;
    int hsel=-1,hn=runtime_ui_hits?runtime_ui_hits(hits,MENU_SLOTS_MAX,&hsel):0;
    if(menu_frame_small(fr)){int k=0,ks=-1;for(int i=0;i<hn;i++){if(hits[i].x<MENU_GRID_PAGE_LEFT_X-10||hits[i].x>MENU_GRID_PAGE_RIGHT_X+10)continue;   /* the inventory: its page only */
      if(i==hsel)ks=k;hits[k++]=hits[i];}hsel=ks;hn=k;}
@@ -336,7 +336,13 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
     if(target==hsel){titleFollow=0;hwait=0;if(titleConfirm){titleConfirm=0;titleKey=38;runtime_input_key_synthetic(38,1);}return;}   /* there: a click is A */
     if(!titleFollow&&!titleConfirm)return;   /* the mouse did not move since (the keyboard may be in use) */
     if(hwait&&now<huntil)return;   /* asked for it already */
-    if(runtime_ui_select){runtime_ui_select(hits[target].id);hwait=1;huntil=now+300000000ull;}   /* the game selects it at its next frame */
+    if(hwait&&hasked==hits[target].id){   /* asked and refused (the Adventure Log's rows: their group is left out of the
+       request): walked there with the d-pad, a row a step, from the selection (given back first if there is none) */
+     extern void runtime_ui_refocus(void) __attribute__((weak));
+     if(hsel<0){if(runtime_ui_refocus)runtime_ui_refocus();huntil=now+100000000ull;return;}
+     static const unsigned dpad[5]={0,5,9,3,11};titleKey=dpad[menu_hit_step(hits,hsel,target)];
+     if(titleKey)runtime_input_key_synthetic(titleKey,1);huntil=now+120000000ull;return;}
+    if(runtime_ui_select){runtime_ui_select(hits[target].id);hwait=1;hasked=hits[target].id;huntil=now+150000000ull;}   /* the game selects it at its next frame */
     return;}}
   /* a list (saves, Start / Cancel, options): one row at a time toward the pointer, the next as soon as the frame moved */
   static float last[4];static int waiting;static uint64_t until;
@@ -372,6 +378,33 @@ static void front_mouse_update(void){   /* main thread; also runtime/gamepad.m's
  }
  fprintf(stderr,"[totk] mouse %s\n",want?"held by the window (the settings panel, key 1, or Command-Tab lets it go)":"let go");
 }
+/* Debug: the menu's hit boxes drawn over the picture (TOTK_HITBOXES=1, or input.txt "hitboxes 1"): each element's box
+   as runtime_ui_hits reads it, in the layout's units (1280x720, centre 0,0) put on the view as the pointer is; green,
+   the selected one red, the one under the pointer filled. Lets every menu be checked: a box that is not on its item. */
+@interface TOTKHitBoxes:NSView
+@property(strong) NSTimer *timer;
+@end
+static TOTKHitBoxes *hitBoxes;
+@implementation TOTKHitBoxes{MenuHit hits[MENU_SLOTS_MAX];int n,sel,under;}
+-(NSView *)hitTest:(NSPoint)p{(void)p;return nil;}   /* clicks go through */
+-(void)drawRect:(NSRect)r{(void)r;
+ NSSize z=self.bounds.size;double sc=fmin(z.width/1280,z.height/720),ox=(z.width-1280*sc)/2,oy=(z.height-720*sc)/2;
+ for(int i=0;i<n;i++){NSRect b=NSMakeRect(ox+(hits[i].x-hits[i].w/2+640)*sc,oy+(hits[i].y-hits[i].h/2+360)*sc,hits[i].w*sc,hits[i].h*sc);
+  NSColor *c=i==sel?NSColor.systemRedColor:NSColor.systemGreenColor;
+  if(i==under){[[c colorWithAlphaComponent:0.25] setFill];NSRectFillUsingOperation(b,NSCompositingOperationSourceOver);}
+  [c setStroke];NSBezierPath *p=[NSBezierPath bezierPathWithRect:b];p.lineWidth=1.5;[p stroke];}}
+-(void)refresh{
+ extern int runtime_ui_hits(MenuHit *,int,int *) __attribute__((weak));
+ n=runtime_ui_hits&&titleMode?runtime_ui_hits(hits,MENU_SLOTS_MAX,&sel):0;under=-1;
+ if(n){NSPoint p=title_pointer(self);NSSize z=self.bounds.size;double sc=fmin(z.width/1280,z.height/720);
+  under=menu_hit_at(hits,n,(p.x-(z.width-1280*sc)/2)/sc-640,(p.y-(z.height-720*sc)/2)/sc-360);}
+ [self setNeedsDisplay:YES];}
+@end
+void runtime_hitboxes(int on){dispatch_async(dispatch_get_main_queue(),^{
+ if(on&&!hitBoxes){hitBoxes=[[TOTKHitBoxes alloc] initWithFrame:window.contentView.bounds];hitBoxes.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+  [window.contentView addSubview:hitBoxes];__weak TOTKHitBoxes *w=hitBoxes;hitBoxes.timer=[NSTimer scheduledTimerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *t){(void)t;[w refresh];}];}
+ else if(!on&&hitBoxes){[hitBoxes.timer invalidate];[hitBoxes removeFromSuperview];hitBoxes=nil;}
+ fprintf(stderr,"[totk] hit boxes %s\n",on?"shown":"hidden");});}
 @interface TOTKHudBox:NSView
 @property(strong) NSTextField *label;
 @property(strong) NSTimer *timer;
@@ -563,6 +596,7 @@ void runtime_front_run(void(*callback)(void)){
      corners by the present encoder (gfx/nvn/fps_overlay.c). The box sits under the opaque boot overlay until it is hidden. */
   if(hud_compact()){TOTKHudBox *box=[[TOTKHudBox alloc] initWithFrame:NSZeroRect];box.autoresizingMask=NSViewMinXMargin|NSViewMinYMargin;
    [window.contentView addSubview:box positioned:NSWindowBelow relativeTo:bootOverlay];[box position];hudBox=box;}
+  if(getenv("TOTK_HITBOXES")&&atoi(getenv("TOTK_HITBOXES")))runtime_hitboxes(1);
   [window makeFirstResponder:window.contentView];[window center];front_sync_drawable();
   if(assume_focus()){[window orderFrontRegardless];}else{[window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];}   /* in front of other apps' windows, keyboard left alone */
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC),dispatch_get_main_queue(),^{note_occlusion(" 3 s after opening");});

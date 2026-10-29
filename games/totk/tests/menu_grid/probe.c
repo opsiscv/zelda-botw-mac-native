@@ -56,6 +56,8 @@ int main(void) {
         check(menu_hit_step(g, 0, 1) == MENU_DOWN || menu_hit_step(g, 0, 1) == MENU_RIGHT, "a diagonal: one of its two ways");
         MenuHit r[2] = { { -476, 97, 90, 90, 0 }, { -280, 97, 90, 90, 0 } };
         check(menu_hit_step(r, 1, 0) == MENU_LEFT, "to the left: left");
+        MenuHit o[2] = { { -260, 130, 486, 60, 0 }, { -280, 130, 32, 32, 0 } };
+        check(menu_hit_at(o, 2, -280, 130) == 1, "a tab icon over a half-scrolled row: the smaller box");
     }
 
     printf("menu-grid: %d/%d checks pass\n", checked - failures, checked);

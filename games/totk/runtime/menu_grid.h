@@ -79,10 +79,11 @@ static inline int menu_slots_complete(MenuSlot *s, int n, int max) {
    size, layout units). The pointer selects only what it is on (user 2026-10-29: hover, nothing between items); the
    selection is walked there with the d-pad, a step along the bigger axis at a time, since the game has no pointer. */
 typedef struct { float x, y, w, h; uint64_t id; } MenuHit;   /* id: the game's element (runtime_ui_select) */
-static inline int menu_hit_at(const MenuHit *h, int n, double x, double y) {
+static inline int menu_hit_at(const MenuHit *h, int n, double x, double y) {   /* boxes over each other: the smallest */
+    int best = -1;
     for (int i = 0; i < n; i++)
-        if (fabs(x - h[i].x) <= h[i].w / 2 && fabs(y - h[i].y) <= h[i].h / 2) return i;
-    return -1;
+        if (fabs(x - h[i].x) <= h[i].w / 2 && fabs(y - h[i].y) <= h[i].h / 2 && (best < 0 || h[i].w * h[i].h < h[best].w * h[best].h)) best = i;
+    return best;
 }
 static inline int menu_hit_step(const MenuHit *h, int from, int to) {
     double dx = h[to].x - h[from].x, dy = h[to].y - h[from].y;
