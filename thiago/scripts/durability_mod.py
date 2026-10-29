@@ -89,3 +89,27 @@ for path in packs:
     written += 1
     print(path, lives)
 print('written', written, 'of', len(packs))
+
+# A weapon dropped or placed in the world starts from ActorInfo's generalLife, not the pack's General.Life (2026-10-29:
+# a Weapon_Sword_003 picked up after the pack edit came with 14 of its listed 27 and broke). 65535: what the game keeps.
+ACTORINFO, INFO_LIFE = 'Actor/ActorInfo.product.sbyml', 65535
+o, s = idx[ACTORINFO]; rom.seek(o); d = bytearray(yaz0_decode(rom.read(s)))
+_, _, keys_at, strs_at, root_at = struct.unpack_from('<2sHIII', d, 0)
+def strtab(at):
+    n = int.from_bytes(d[at+1:at+4], 'little'); offs = struct.unpack_from('<%dI' % (n + 1), d, at + 4)
+    return [d[at+x:d.index(b'\0', at + x)].decode() for x in offs[:n]]
+K, S = strtab(keys_at), strtab(strs_at)
+def items(at):
+    assert d[at] == 0xC1
+    return {K[int.from_bytes(d[e:e+3], 'little')]: (d[e+3], e + 4) for e in (at + 4 + i*8 for i in range(int.from_bytes(d[at+1:at+4], 'little')))}
+arr = struct.unpack_from('<I', d, items(root_at)['Actors'][1])[0]; n = int.from_bytes(d[arr+1:arr+4], 'little')
+changed = 0
+for i in range(n):
+    actor = items(struct.unpack_from('<I', d, arr + 4 + ((n + 3) & ~3) + i*4)[0])
+    name = S[struct.unpack_from('<I', d, actor['name'][1])[0]]
+    if 'generalLife' in actor and name.startswith(('Weapon_Sword_', 'Weapon_Lsword_', 'Weapon_Spear_', 'Weapon_Bow_', 'Weapon_Shield_')):
+        t, v = actor['generalLife']
+        if t == 0xD1 and struct.unpack_from('<i', d, v)[0] > 0: struct.pack_into('<i', d, v, INFO_LIFE); changed += 1
+dst = OUT/ACTORINFO; dst.parent.mkdir(parents=True, exist_ok=True); dst.write_bytes(yaz0_encode(bytes(d)))
+assert yaz0_decode(dst.read_bytes()) == bytes(d)
+print(ACTORINFO, 'generalLife set on', changed, 'weapons')

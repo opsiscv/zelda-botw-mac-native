@@ -167,7 +167,7 @@ __attribute__((constructor)) static void input_script_start(void) {
 /* Optional local integration-test command stream. Appending complete lines lets tests inspect each
    actual frame before choosing the next input, instead of guessing load/menu timings. Disabled normally.
    Commands: key <Mac keycode> <milliseconds>, down/up <Mac keycode>, shot <path>, wshot <path>, passdump <frames>, querylog <frames>, anomdump,
-   kbtest / kbtype <text> / kbenter / kbesc / kbshot <path> (the text entry bar), threads (dump every guest thread's wait), hletrace <0|1|2> (host calls the game makes), framestep <ms> (pin the frame step), close. */
+   winkey <code> <ms> (a key through the window's own handling), kbtest / kbtype <text> / kbenter / kbesc / kbshot <path> (the text entry bar), threads (dump every guest thread's wait), hletrace <0|1|2> (host calls the game makes), framestep <ms> (pin the frame step), close. */
 extern void dm_gfx_shot_at(long frames, const char *path);
 extern void runtime_front_request_close(void);
 static void *input_file(void *arg) {
@@ -268,6 +268,9 @@ static void *input_file(void *arg) {
             line[strcspn(line, "\r\n")] = 0; runtime_front_text_test("type", line + 7);
         } else if (!strncmp(line, "kbshot ", 7)) {   /* "kbshot <path>": the open bar as a PNG */
             line[strcspn(line, "\r\n")] = 0; runtime_front_text_test("shot", line + 7);
+        } else if (sscanf(line, "winkey %u %u %n", &code, &ms, &used) == 2 && used && !line[used] && code < 128 && ms > 0 && ms <= 5000) {
+            extern void runtime_front_key(unsigned, unsigned) __attribute__((weak));   /* a window key (frontend.m front_key_down) */
+            if (runtime_front_key) runtime_front_key(code, ms);
         } else if (!strcmp(line, "kbenter\n") || !strcmp(line, "kbesc\n")) {
             runtime_front_text_test(line[2] == 'e' && line[3] == 'n' ? "enter" : "esc", NULL);
         } else if (sscanf(line, "hletrace %u %n", &code, &used) == 1 && used && !line[used] && code <= 2) {
