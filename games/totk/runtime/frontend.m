@@ -198,6 +198,12 @@ static void caps_hid_start(void){
 void runtime_input_key_synthetic(unsigned code,int down);
 static unsigned clickKey;   /* a synthetic press, let go at the next tick */
 static void press(unsigned code){if(clickKey)return;clickKey=code;runtime_input_key_synthetic(code,1);}
+static NSCursor *menuCursor;   /* the menus' pointer: cursor.png next to controls.txt, else the arrow */
+static NSCursor *menu_cursor(void){if(!menuCursor){char path[4096];extern int runtime_setting_path(const char *,char *,size_t);
+  NSImage *im=runtime_setting_path("cursor.png",path,sizeof path)?[[NSImage alloc] initWithContentsOfFile:@(path)]:nil;
+  if(im){im.size=NSMakeSize(24,24*im.size.height/fmax(1,im.size.width));menuCursor=[[NSCursor alloc] initWithImage:im hotSpot:NSMakePoint(1,1)];}else menuCursor=NSCursor.arrowCursor;}
+ return menuCursor;}
+-(void)resetCursorRects{if(uiMenu)[self addCursorRect:self.bounds cursor:menu_cursor()];else [super resetCursorRects];}   /* kept by AppKit over the window */
 -(void)hideCursorIfIdle:(NSTimer *)timer{
  (void)timer;self.cursorHideTimer=nil;
  if(runtime_mouse_enabled()||!self.cursorAutoHideActive||!self.window.isKeyWindow||!(self.window.styleMask&NSWindowStyleMaskFullScreen))return;
@@ -206,6 +212,7 @@ static void press(unsigned code){if(clickKey)return;clickKey=code;runtime_input_
 -(void)mouseMoved:(NSEvent *)e{
  if(mouseHeld){runtime_mouse_move(e.deltaX,e.deltaY);return;}
  keysLead=0;   /* the mouse has the say again */
+ if(uiMenu)[menu_cursor() set];
  if(runtime_mouse_enabled()||!self.cursorAutoHideActive)return;
  [self.cursorHideTimer invalidate];set_cursor_hidden(NO);
  self.cursorHideTimer=[NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(hideCursorIfIdle:) userInfo:nil repeats:NO];
@@ -261,7 +268,8 @@ static void title_tick(void){   /* main thread, every 8 ms: the three answers, n
  int inv=0;for(int i=0;i<uiN;i++)inv+=fabsf(uiHits[i].w-90)<6&&fabsf(uiHits[i].h-90)<6;uiInventory=inv>=2;   /* its 90 x 90 slots */
  if(uiInventory){int k=0;for(int i=0;i<uiN;i++)if(uiHits[i].x>=MENU_GRID_PAGE_LEFT_X-10&&uiHits[i].x<=MENU_GRID_PAGE_RIGHT_X+10)uiHits[k++]=uiHits[i];uiN=k;}   /* its page only */
  int menu=uiN>0;
- if(menu!=uiMenu){uiMenu=menu;fprintf(stderr,"[totk] menu pointer: %s\n",menu?"a menu":"no menu");}
+ if(menu!=uiMenu){uiMenu=menu;fprintf(stderr,"[totk] menu pointer: %s\n",menu?"a menu":"no menu");
+  [window invalidateCursorRectsForView:window.contentView];if(menu){[menu_cursor() set];window.acceptsMouseMovedEvents=YES;}}
  front_mouse_update();
  if(on&&window.isKeyWindow)set_cursor_hidden(mouseHeld||(!menu&&NSPointInRect(NSEvent.mouseLocation,[window convertRectToScreen:window.contentView.frame])));   /* shown only on a menu; off the game's window it is the Mac's */
  if(runtime_ui_mouse_rules)runtime_ui_mouse_rules(on&&!keysLead);

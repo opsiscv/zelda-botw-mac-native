@@ -2171,14 +2171,14 @@ int runtime_ui_hits(MenuHit *out, int max, int *selected) {
     int8_t fl[128]; if (!camdump_read(flagsp, fl, (size_t)count)) return 0;
     float at[2]; int have_at = camdump_read(obj + 0x58, at, sizeof at);   /* where the frame is: the selected element's place */
     (void)end;
-    int n = 0, best = 0;
+    int n = 0, best = 0, n_title_seen = 0; MenuHit title_seen[8];
     for (int pass = 0; pass < 2 && !n && !(pass && sel); pass++)   /* none selected and no group known (the menu made again
        when it opens): the group with the most items on screen */
     for (int g = 0; g < count && n < max; g++) {   /* every group: a long list's group can be flagged left out while it scrolls */
         uint64_t grp = 0, node = 0; int32_t off = 0;
         if (pass && fl[g] < 0) continue;   /* the fallback: only groups in use (a closed dialog's buttons are left out) */
         if (!camdump_read(groups + 8 * (uint64_t)g, &grp, 8) || !camdump_read(grp + 0x90, &node, 8) || !camdump_read(grp + 0x9c, &off, 4)) continue;
-        int start = n, mine = 0, n_title = 0; MenuHit title[8];
+        int start = n, mine = 0, n_title = 0; MenuHit title[8];   /* the title's anchors, kept in title_seen */
         for (int k = 0; k < 300 && n < max && node && node != grp + 0x88; k++) {
             uint64_t e = node - (uint64_t)(int64_t)off; mine |= sel && e == sel;
             mine |= !sel && grp == g_last_group;   /* none selected: the group last seen (a page turn moves every element) */
@@ -2219,17 +2219,19 @@ int runtime_ui_hits(MenuHit *out, int max, int *selected) {
             if (sel && n > before && have_at && fabsf(out[n - 1].x - at[0]) < 3 && fabsf(out[n - 1].y - at[1]) < 3) mine = 1;   /* the frame is on it (none selected: its place is stale) */
             if (!camdump_read(node + 8, &node, 8)) break;
         }
-        if (n_title >= 6 && !runtime_game_world_live()) {   /* the title: its items, one fewer than the anchors (the last is below
-            them), as boxes over their text (menu_pointer.h menu_title_box); an anchor stands for its item */
-            for (int i = 1; i < n_title; i++) for (int j = i; j > 0 && title[j].y > title[j - 1].y; j--) { MenuHit t = title[j]; title[j] = title[j - 1]; title[j - 1] = t; }
-            for (int i = 0; i < n_title - 1 && n < max; i++) { MenuHit b = title[i]; double x0, y0; menu_title_box(n_title - 1, i, &x0, &y0); b.x = (float)((x0 + 590) / 2); b.y = (float)y0; b.w = (float)(590 - x0); b.h = 28; out[n++] = b; }
-        }
+        if (n_title >= 6 && n_title > n_title_seen) { n_title_seen = n_title; memcpy(title_seen, title, sizeof title); }
         if (pass) {   /* the biggest group so far kept, at the front */
             if (n - start > best) { best = n - start; memmove(out, out + start, (size_t)best * sizeof *out); g_last_group = grp; }
             n = best;
         }
         else if (!mine) n = start;   /* only the selected element's group: the popup's, not the page behind it */
         else if (n > start) g_last_group = grp;
+    }
+    if (!n && n_title_seen >= 6 && !runtime_game_world_live()) {   /* only the title's anchors (no other menu over it): its
+        items, one fewer than the anchors (the last is below them), as boxes over their text (menu_pointer.h menu_title_box) */
+        MenuHit *t = title_seen; int c = n_title_seen;
+        for (int i = 1; i < c; i++) for (int j = i; j > 0 && t[j].y > t[j - 1].y; j--) { MenuHit x = t[j]; t[j] = t[j - 1]; t[j - 1] = x; }
+        for (int i = 0; i < c - 1 && n < max; i++) { MenuHit b = t[i]; double x0, y0; menu_title_box(c - 1, i, &x0, &y0); b.x = (float)((x0 + 590) / 2); b.y = (float)y0; b.w = (float)(590 - x0); b.h = 28; out[n++] = b; }
     }
     for (int i = 0; sel && i < n; i++) if (out[i].id == sel) { *selected = i; break; }   /* the selected element, or where the frame is */
     if (*selected < 0 && have_at)
