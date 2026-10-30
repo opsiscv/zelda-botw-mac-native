@@ -2288,7 +2288,7 @@ static int ui_nav_hook(ucontext_t *u) {
         opening asks for its first item, +0x50; with none selected it picks one) are dropped, only the pointer's stand */
         uint64_t pend = 0, asked = atomic_load(&g_asked); camdump_read(x[19] + 0x50, &pend, 8);
         if (pend && pend != asked) { *(volatile uint64_t *)(uintptr_t)(x[19] + 0x50) = 0; pend = 0; }
-        if (sel && sel != asked && x[19] == cursor_object()) atomic_store(&g_unfocus_obj, x[19]);   /* one it picked: let go */
+        if (sel && sel != asked && !pend && x[19] == cursor_object()) atomic_store(&g_unfocus_obj, x[19]);   /* one it picked: let go (not while the pointer's request waits: it replaces it) */
         if (!sel && !pend) {
             u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + (pc == UI_ENSURE_SITE ? 0x134f194 : UI_NOTHING); return 1;
         }
