@@ -168,7 +168,9 @@ extern int runtime_title_cursor(void) __attribute__((weak));
 static unsigned space_key(void){int r=space_role(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,pause_menu_open());
  return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
 /* A window key after the settings panel: what it presses depends on where the game is (above). */
+static uint64_t menuClosing;   /* Esc on the pause menu's page (not a popup): it is closing, the pointer goes at once (title_tick) */
 static void front_key_down(unsigned short code,int repeat){
+ if(code==53&&!repeat&&pause_menu_open()){MenuHit h[16];int sel,n=runtime_ui_hits?runtime_ui_hits(h,16,&sel):0;if(n>4)menuClosing=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);}
  if(code!=53&&code!=48&&code!=12&&code!=14&&code!=36&&code!=49)keysLead=1;   /* a key that walks the menu (not Esc, Tab, Q, E, Enter, Space): the game picks again */
  if(mouseLast&&code!=53&&code!=48&&code!=12&&code!=14){mouseLast=0;if(runtime_ui_unfocused&&runtime_ui_unfocused())give_back();else if(runtime_ui_refocus)runtime_ui_refocus();}   /* the keyboard: a selection again; not for Esc (it closes, user 2026-10-29: given back first it showed Cancel taken), Tab, Q, E */
  if(code==56&&in_menu())return;   /* Shift in a menu: nothing (only Esc goes back) */
@@ -237,7 +239,7 @@ static int title_item_at(NSView *v,NSEvent *e){NSPoint p=[v convertPoint:e.locat
 -(void)mouseMoved:(NSEvent *)e{
  if(mouseHeld){runtime_mouse_move(e.deltaX,e.deltaY);return;}
  if(titleMode){titleFollow=2;
-  [self.cursorHideTimer invalidate];self.cursorHideTimer=nil;if(!mouseHeld)set_cursor_hidden(NO);
+  [self.cursorHideTimer invalidate];self.cursorHideTimer=nil;   /* shown or not: title_tick */
   if(titleFree)self.cursorHideTimer=[NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(hideCursorIfIdle:) userInfo:nil repeats:NO];
   int i=titleFree?-1:title_item_at(self,e);titleTarget=i;if(titleCursor)[titleCursor set];return;}
  if(!self.cursorAutoHideActive)return;
@@ -303,8 +305,8 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
   int n=runtime_ui_elements?runtime_ui_elements(h,16,&sel):0;for(int i=0;i<n;i++)k+=fabsf(h[i].x-991)<2;if(k>=5)cur=0;}   /* at x 991 (menu_pointer.h) */
  int frame=cur<0&&on&&!runtime_input_dpad_held()&&runtime_menu_frame&&runtime_menu_frame(fr);
  if(cur>=0&&on&&!world){MenuHit h[4];int sel;if(runtime_ui_hits&&runtime_ui_hits(h,4,&sel)>0){cur=-1;frame=1;}}
- if(frame&&world){MenuHit h[4];int sel;if(!(runtime_ui_hits&&runtime_ui_hits(h,4,&sel)>0))frame=0;}   /* in the world a frame left drawn with no items on screen
-   (the menu just closed, nothing selected) is no menu: the mouse goes back to the camera (2026-10-29: the pointer stayed on the world) */   /* items on screen over the title (the save list): that menu */
+ if(frame){MenuHit h[4];int sel;if(!(runtime_ui_hits&&runtime_ui_hits(h,4,&sel)>0))frame=0;}   /* a frame left drawn with no items on screen (a menu
+   closing, fading out) is no menu: no pointer, the mouse back to the camera (2026-10-29: the pointer stayed a second on the world) */   /* items on screen over the title (the save list): that menu */
  {static float lastFr[4];static int lastCur=-1;   /* nothing selected (the pointer on nothing, or a request refused): no frame, no title */
   if(frame){memcpy(lastFr,fr,sizeof lastFr);lastCur=-1;}   /* arrow, but still the same menu: told by its items on screen */
   else if(cur>=0)lastCur=cur;
@@ -314,13 +316,15 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
   if(world)lastCur=-1;}
  int pm=menu_pointer_mode(on,cur,frame,world),mode=pm>=MENU_POINTER_TITLE;
  {static int lastPm=-1;if(pm!=lastPm&&getenv("TOTK_DEBUG_LOG"))fprintf(stderr,"[totk] menu pointer kind %d -> %d (title item %d, frame %d, world %d)\n",lastPm,pm,cur,frame,world);lastPm=pm;}
- if(pm==MENU_POINTER_FREE&&titleMode&&!titleFree&&titleFrame&&pause_menu_open())set_cursor_hidden(YES);   /* the pause menu closing into its fade (the
-   world not yet back): hidden at once; not any menu's moment without items (it hid the pointer on the save list, 2026-10-29) */
- if((pm==MENU_POINTER_TITLE||pm==MENU_POINTER_FRAME)&&!mouseHeld)set_cursor_hidden(NO);   /* a menu: the pointer always shown */
+ if(on&&window.isKeyWindow){BOOL onGame=mouseHeld||NSPointInRect(NSEvent.mouseLocation,[window convertRectToScreen:window.contentView.frame]);
+  int closing=menuClosing&&!world&&clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-menuClosing<2000000000ull;if(world)menuClosing=0;
+  set_cursor_hidden(onGame&&(closing||!((pm==MENU_POINTER_TITLE||pm==MENU_POINTER_FRAME)&&!mouseHeld)));}   /* the pointer only on a menu's items:
+   the game playing, loading or fading out of a menu shows none (user 2026-10-29), at once, whatever the mouse's hold waits
+   for; off the game's window (another screen) it is the Mac's */
  titleFrame=frame;titleFree=pm==MENU_POINTER_FREE;
  {static uint64_t offAt;uint64_t t=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);   /* the world going on a moment (a menu's camera, a page */
   if(mode)offAt=0;                                                               /* turning): the pointer mode holds through it, so the */
-  else if(titleMode){if(!offAt){offAt=t;if(titleFrame&&pause_menu_open())set_cursor_hidden(YES);}if(t-offAt<500000000ull)return;}}   /* pointer is not taken and given back every time;
+  else if(titleMode){if(!offAt)offAt=t;if(t-offAt<500000000ull)return;}}   /* pointer is not taken and given back every time;
      a menu closing hides it at once (user 2026-10-29: it stayed a second); a move shows it again */
  if(mode!=titleMode){titleMode=mode;titleTarget=-1;titleConfirm=0;front_mouse_update();
   if(mode){mouseLast=1;titleFollow=2;}   /* a menu opening: the pointer has the say at once (nothing selected unless it is on an item) */
