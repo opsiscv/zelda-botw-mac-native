@@ -303,7 +303,9 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
    [titleCursor set];window.acceptsMouseMovedEvents=YES;}   /* the hover needs moves in a window too */
   [window invalidateCursorRectsForView:window.contentView];
   fprintf(stderr,"[totk] menu pointer: %s\n",mode?(frame?"a menu with the selection frame":titleFree?"free (the world stopped)":"the title menu"):"off");}
- if(!mode){titleScroll=0;if(mouseLast){mouseLast=0;if(runtime_ui_refocus)runtime_ui_refocus();}return;}
+ if(!mode){titleScroll=0;mouseLast=0;extern void runtime_ui_unfocus_next(void) __attribute__((weak));
+  if(runtime_ui_unfocus_next)runtime_ui_unfocus_next();   /* no menu: the next one starts with nothing selected */
+  return;}
  if(titleFree){titleScroll=0;   /* the map, a dialog: a click is A, unless the screen has items and it is on none */
   if(titleConfirm){titleConfirm=0;MenuHit h[MENU_SLOTS_MAX];int sel,n=runtime_ui_hits?runtime_ui_hits(h,MENU_SLOTS_MAX,&sel):0;
    NSView *v=window.contentView;NSPoint p=title_pointer(v);double w=v.bounds.size.width,hh=v.bounds.size.height,sc=fmin(w/1280,hh/720);

@@ -2187,7 +2187,9 @@ static int ui_hits(MenuHit *out, int max, int *selected, int all) {
     int8_t fl[128]; if (!camdump_read(flagsp, fl, (size_t)count)) return 0;
     float at[2]; int have_at = camdump_read(obj + 0x58, at, sizeof at);   /* where the frame is: the selected element's place */
     (void)end;
-    int n = 0;
+    int n = 0, best = 0;
+    for (int pass = 0; pass < 2 && !n && !(pass && sel); pass++)   /* none selected and no group known (the menu made again
+       when it opens): the group with the most items on screen */
     for (int g = 0; g < count && n < max; g++) {   /* every group: a long list's group can be flagged left out while it scrolls */
         uint64_t grp = 0, node = 0; int32_t off = 0;
         if (!camdump_read(groups + 8 * (uint64_t)g, &grp, 8) || !camdump_read(grp + 0x90, &node, 8) || !camdump_read(grp + 0x9c, &off, 4)) continue;
@@ -2224,10 +2226,14 @@ static int ui_hits(MenuHit *out, int max, int *selected, int all) {
                 }
                 if (shown && !empty) out[n++] = (MenuHit){ x, y, w, h, e };
             }
-            if (n > before && have_at && fabsf(out[n - 1].x - at[0]) < 3 && fabsf(out[n - 1].y - at[1]) < 3) mine = 1;   /* the frame is on it */
+            if (sel && n > before && have_at && fabsf(out[n - 1].x - at[0]) < 3 && fabsf(out[n - 1].y - at[1]) < 3) mine = 1;   /* the frame is on it (none selected: its place is stale) */
             if (!camdump_read(node + 8, &node, 8)) break;
         }
-        if (!mine) n = start;   /* only the selected element's group: the popup's, not the page behind it */
+        if (pass) {   /* the biggest group so far kept, at the front */
+            if (n - start > best) { best = n - start; memmove(out, out + start, (size_t)best * sizeof *out); g_last_group = grp; }
+            n = best;
+        }
+        else if (!mine) n = start;   /* only the selected element's group: the popup's, not the page behind it */
         else if (n > start) g_last_group = grp;
     }
     for (int i = 0; sel && i < n; i++) if (out[i].id == sel) { *selected = i; break; }   /* the selected element, or where the frame is */
@@ -2249,16 +2255,20 @@ static int ui_hits(MenuHit *out, int max, int *selected, int all) {
 enum { UI_UPDATE_WORD = 0xf9402660,   /* ldr x0, [x19, #0x48] at UI_UPDATE_SITE */
        UI_LETGO_WORD = 0xb40001d4,    /* cbz x20, main+0x134e530 at UI_LETGO_SITE, after the old element's 0x138 */
        UI_DESELECT = 0x134e4e8, UI_NOTHING = 0x134e610 };
-static _Atomic uint64_t g_unfocus_obj; static int g_letgo;   /* g_letgo: the update's thread, between the two sites */
+static _Atomic uint64_t g_unfocus_obj; static int g_letgo;
+static _Atomic int g_unfocus_next;   /* the next cursor step (any menu) starts with nothing selected */   /* g_letgo: the update's thread, between the two sites */
 void runtime_ui_select(uint64_t element) {
     uint64_t obj = cursor_object(); if (!obj) return;
-    atomic_store(&g_unfocus_obj, 0); *(volatile uint64_t *)(uintptr_t)(obj + 0x50) = element;
+    atomic_store(&g_unfocus_next, 0); atomic_store(&g_unfocus_obj, 0); *(volatile uint64_t *)(uintptr_t)(obj + 0x50) = element;
 }
+void runtime_ui_unfocus_next(void) { atomic_store(&g_unfocus_next, 1); g_last_group = 0; }   /* frontend.m: while no menu is open (its groups made anew next time) */
 void runtime_ui_unfocus(void) { atomic_store(&g_unfocus_obj, cursor_object()); }
-void runtime_ui_refocus(void) { atomic_store(&g_unfocus_obj, 0); }
+void runtime_ui_refocus(void) { atomic_store(&g_unfocus_next, 0); atomic_store(&g_unfocus_obj, 0); }
 int runtime_ui_unfocused(void) { uint64_t o = atomic_load(&g_unfocus_obj); return o && o == cursor_object(); }
 static int ui_nav_hook(ucontext_t *u) {
     uint64_t *x = u->uc_mcontext->__ss.__x, pc = u->uc_mcontext->__ss.__pc - (uintptr_t)g_nav_main, sel = 0;
+    if (atomic_exchange(&g_unfocus_next, 0) && runtime_mouse_enabled()) atomic_store(&g_unfocus_obj, x[19]);   /* a menu opening:
+        nothing selected from its first step, before its own pick shows (user 2026-10-29); the pointer then asks for what it is on */
     if (pc == UI_LETGO_SITE) {
         if (g_letgo) { g_letgo = 0; u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + UI_NOTHING; return 1; }
         if (!x[20]) u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + 0x134e530; else u->uc_mcontext->__ss.__pc += 4;
@@ -2266,7 +2276,10 @@ static int ui_nav_hook(ucontext_t *u) {
     }
     camdump_read(x[19] + 0x48, &sel, 8);
     if (pc == UI_ENSURE_SITE) {   /* the other per-frame step that picks one when none is selected (main+0x134f100) */
-        if (!sel && x[19] == atomic_load(&g_unfocus_obj)) u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + 0x134f194;   /* none: it stays none */
+        if (x[19] == atomic_load(&g_unfocus_obj)) {   /* none: it stays none (one left from the menu's last opening: forgotten) */
+            if (sel) *(volatile uint64_t *)(uintptr_t)(x[19] + 0x48) = 0;
+            u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + 0x134f194;
+        }
         else { x[0] = sel; u->uc_mcontext->__ss.__pc += 4; }
         return 1;
     }
