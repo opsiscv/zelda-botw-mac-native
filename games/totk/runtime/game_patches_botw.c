@@ -1872,14 +1872,6 @@ static uint64_t title_pane(void) {   /* the cursor layout's N_LT_00, 0 while not
     }
     return pane;
 }
-static int g_title_count = 5;
-int runtime_title_count(void) { return g_title_count; }   /* 5, or 6 with the DLC */
-int runtime_title_cursor(void) {
-    if (!g_uw_main || runtime_game_world_live()) return -1;
-    uint64_t pane = title_pane(); float xy[2];
-    if (!pane || !camdump_read(pane + 0x30, xy, sizeof xy)) return -1;
-    return menu_title_index(xy[0], xy[1], &g_title_count);
-}
 /* The selection frame of the other menus with this cursor (the load list, Start / Cancel, the inventory): r = {left, top,
    right, bottom} from N_LT_00 and N_RD_00 (found with it, checked by name), while the world is stopped, it is a box,
    and it is drawn (menu_frame_shown). Called every few ms, also while the world runs. */
@@ -1933,14 +1925,6 @@ int runtime_inventory_slots(MenuSlot *out, int max, int *selected) {
     if (camdump_read(obj + 0x58, at, sizeof at))
         for (int i = 0; i < n; i++) if (fabsf(out[i].x - at[0]) < 3 && fabsf(out[i].y - at[1]) < 3) *selected = i;
     return n;
-}
-int runtime_menu_frame(float r[4]) {
-    if (!g_uw_main) return 0;
-    uint64_t pane = title_pane(); float lt[2], rd[2]; char name[8]; uint8_t alpha;
-    if (!pane || !g_cursor_rd || !camdump_read(pane + 0x30, lt, sizeof lt) || !camdump_read(pane + 0x5a, &alpha, 1) || !camdump_read(g_cursor_rd + 0xb8, name, 8) || memcmp(name, "N_RD_00", 8)
-        || !camdump_read(g_cursor_rd + 0x30, rd, sizeof rd)) return 0;
-    r[0] = lt[0]; r[1] = lt[1]; r[2] = rd[0]; r[3] = rd[1];
-    return menu_frame_shown(alpha) && !runtime_game_world_live() && menu_frame_valid(r[0], r[1], r[2], r[3]);
 }
 /* Diagnostic "poke64 <hex address> <hex value>": writes 8 bytes. */
 void botw_poke64(uint64_t addr, uint64_t value) {
@@ -2170,12 +2154,8 @@ void botw_uilist(void) {
    touch area, at the same place in the panes after it); the selected one is at the cursor's place. Only shown ones (visible flag 0x01 at +0x58, alpha +0x5a not 0, and so are all its parents: a closed dialog's
    buttons are hidden by its root), and no empty inventory slot (its
    N_Born_00 hidden: flag 0x80). Returns how many, *selected the selected element's index (-1 if it has none); 0: no menu. */
-static int ui_hits(MenuHit *out, int max, int *selected, int all);
-static uint64_t g_last_group;   /* ui_hits: the group the selection was last in */
-int runtime_ui_hits(MenuHit *out, int max, int *selected) { return ui_hits(out, max, selected, 0); }
-/* The title's items: its elements are the arrow's anchors, never shown, so all of them (frontend.m title_select). */
-int runtime_ui_elements(MenuHit *out, int max, int *selected) { return ui_hits(out, max, selected, 1); }
-static int ui_hits(MenuHit *out, int max, int *selected, int all) {
+static uint64_t g_last_group;   /* ui_hits: the group the menu was last seen in (the selection's, or what the game wanted) */
+int runtime_ui_hits(MenuHit *out, int max, int *selected) {
     *selected = -1;
     /* The groups the d-pad step looks through (main+0x134e654..0x134e924): the cursor's group set (+0x20, +0x80, +0x28):
        count +0x28, groups +0x30, first-past-active +0x38, a signed byte per group +0x40 (negative: left out); from
@@ -2198,10 +2178,10 @@ static int ui_hits(MenuHit *out, int max, int *selected, int all) {
         uint64_t grp = 0, node = 0; int32_t off = 0;
         if (pass && fl[g] < 0) continue;   /* the fallback: only groups in use (a closed dialog's buttons are left out) */
         if (!camdump_read(groups + 8 * (uint64_t)g, &grp, 8) || !camdump_read(grp + 0x90, &node, 8) || !camdump_read(grp + 0x9c, &off, 4)) continue;
-        int start = n, mine = 0;
+        int start = n, mine = 0, n_title = 0; MenuHit title[8];
         for (int k = 0; k < 300 && n < max && node && node != grp + 0x88; k++) {
             uint64_t e = node - (uint64_t)(int64_t)off; mine |= sel && e == sel;
-            mine |= !sel && grp == g_last_group;   /* none selected: the group last in use (a page turn moves every element) */
+            mine |= !sel && grp == g_last_group;   /* none selected: the group last seen (a page turn moves every element) */
             int before = n;
             /* the element's pane (+0x18, +0x60: the hit box B_Hit_00 in the inventory and the log) and the panes around it
                at the same place: the hit box, and N_Born_00 (before it) without flag 0x80 for an empty inventory slot */
@@ -2219,10 +2199,11 @@ static int ui_hits(MenuHit *out, int max, int *selected, int all) {
                     if (!memcmp(win + o + 0xb8, "W_Base_01", 10) && (win[o + 0x58] & 0x80)) based = 1;
                 }
                 if (slot && !based) empty = 1;   /* an inventory slot holds an item only with its base shown (an empty armor slot keeps N_Born) */
-                int shown = all || ((body[0x58] & 1) && body[0x5a]);   /* it and every parent (+0x18): visible (flag 0x01) and not see-through */
+                if (fabsf(x - 991) < 2 && fabsf(y) < 360 && n_title < 8) { title[n_title++] = (MenuHit){ x, y, w, h, e }; goto next; }   /* the title's arrow anchors */
+                int shown = (body[0x58] & 1) && body[0x5a] >= 0x80;   /* it and every parent (+0x18): visible (flag 0x01) and mostly opaque (not fading out) */
                 uint64_t up = 0; camdump_read(pane + 0x18, &up, 8);
-                for (int k = 0; shown && !all && up && k < 24; k++) {
-                    uint8_t f[3] = {0}; char nm[8] = {0}; if (!camdump_read(up + 0x58, f, 3)) break; shown = (f[0] & 1) && f[2];
+                for (int k = 0; shown && up && k < 24; k++) {
+                    uint8_t f[3] = {0}; char nm[8] = {0}; if (!camdump_read(up + 0x58, f, 3)) break; shown = (f[0] & 1) && f[2] >= 0x80;
                     if (shown && camdump_read(up + 0xb8, nm, 6) && !memcmp(nm, "N_Cut", 5)) {   /* a list's clip area: rows scrolled out of it are not on screen */
                         float c[2], cs[2], c00, c11; camdump_read(up + 0x7c, c, 4); camdump_read(up + 0x8c, c + 1, 4); camdump_read(up + 0x50, cs, 8); camdump_read(up + 0x70, &c00, 4); camdump_read(up + 0x84, &c11, 4);
                         float hw = cs[0] * fabsf(c00) / 2, hh = cs[1] * fabsf(c11) / 2, x0 = fmaxf(x - w / 2, c[0] - hw), x1 = fminf(x + w / 2, c[0] + hw), y0 = fmaxf(y - h / 2, c[1] - hh), y1 = fminf(y + h / 2, c[1] + hh);
@@ -2231,11 +2212,17 @@ static int ui_hits(MenuHit *out, int max, int *selected, int all) {
                     }
                     if (!camdump_read(up + 0x18, &up, 8)) break;
                 }
-                if (!all && (fabsf(x) > 640 || fabsf(y) > 360)) shown = 0;   /* off the screen (the title's arrow anchors: in their own units) */
+                if (fabsf(x) > 640 || fabsf(y) > 360) shown = 0;   /* off the screen */
                 if (shown && !empty) out[n++] = (MenuHit){ x, y, w, h, e };
             }
+            next:
             if (sel && n > before && have_at && fabsf(out[n - 1].x - at[0]) < 3 && fabsf(out[n - 1].y - at[1]) < 3) mine = 1;   /* the frame is on it (none selected: its place is stale) */
             if (!camdump_read(node + 8, &node, 8)) break;
+        }
+        if (n_title >= 6 && !runtime_game_world_live()) {   /* the title: its items, one fewer than the anchors (the last is below
+            them), as boxes over their text (menu_pointer.h menu_title_box); an anchor stands for its item */
+            for (int i = 1; i < n_title; i++) for (int j = i; j > 0 && title[j].y > title[j - 1].y; j--) { MenuHit t = title[j]; title[j] = title[j - 1]; title[j - 1] = t; }
+            for (int i = 0; i < n_title - 1 && n < max; i++) { MenuHit b = title[i]; double x0, y0; menu_title_box(n_title - 1, i, &x0, &y0); b.x = (float)((x0 + 590) / 2); b.y = (float)y0; b.w = (float)(590 - x0); b.h = 28; out[n++] = b; }
         }
         if (pass) {   /* the biggest group so far kept, at the front */
             if (n - start > best) { best = n - start; memmove(out, out + start, (size_t)best * sizeof *out); g_last_group = grp; }
@@ -2250,67 +2237,45 @@ static int ui_hits(MenuHit *out, int max, int *selected, int all) {
     return n;
 }
 
-/* The menu cursor's per-frame update (main+0x134e410, the cursor object in x19; x20 its owner, [x0+0x20]+0x80):
-   +0x48 the selected element, +0x50 an element asked for, which the update selects itself (main+0x134e4b8: the old
-   element's 0x138, +0x48, the frame's place +0x58, the new one's 0x130, its description), and with +0x48 null it
-   takes the game's own "nothing selected" way (main+0x134e610: +0x48 cleared, the owner's 0x30 with -1: no frame).
-   With the pointer on an element (user 2026-10-29: hover) runtime_ui_select asks for it there. With the pointer on
-   nothing (no focus at all) runtime_ui_unfocus: at main+0x134e48c the selected element is let go with the game's own
-   call (main+0x134e4e8: its 0x138, as when another is taken), then main+0x134e4f8 goes on to the nothing-selected way;
-   with none selected the update goes there at once, instead of picking one again (main+0x134eb30). A key, or the
-   pointer on an element, ends it. The other per-frame step that picks one when none is selected (main+0x134f170, the
-   same ldr x0, [x19, #0x48]; it made the frame blink, 2026-10-29) skips the pick for it too. Only for that cursor object (x19). */
-enum { UI_UPDATE_WORD = 0xf9402660,   /* ldr x0, [x19, #0x48] at UI_UPDATE_SITE */
+/* The menu cursor's per-frame update (main+0x134e410, the cursor object in x19): +0x48 the selected element, +0x50 an
+   element asked for, which the update selects itself (main+0x134e4b8: the old element's 0x138, +0x48, the frame's place
+   +0x58, the new one's 0x130, its description); with +0x48 null it takes the game's own "nothing selected" way
+   (main+0x134e610: the owner's 0x30 with -1, no frame) unless it picks one (main+0x134eb30; also the other per-frame
+   step main+0x134f170). One value rules it while the mouse has the say (user 2026-10-29: the item under the pointer,
+   or nothing): g_asked, set by runtime_ui_select (frontend.m, from the boxes on screen). Here the selection is held to
+   it: the game's own requests (a screen opening asks for its first item) and picks are dropped, a selected element
+   that is not g_asked is let go the game's way (main+0x134e4e8: its 0x138, then main+0x134e4f8 on to nothing). The
+   group of what the game wanted is kept (g_last_group): it tells ui_hits which items are the menu's (a popup's).
+   A key that walks the menu hands it back to the game (runtime_ui_mouse_rules 0). */
+enum { UI_UPDATE_WORD = 0xf9402660,   /* ldr x0, [x19, #0x48] at UI_UPDATE_SITE and UI_ENSURE_SITE */
        UI_LETGO_WORD = 0xb40001d4,    /* cbz x20, main+0x134e530 at UI_LETGO_SITE, after the old element's 0x138 */
-       UI_DESELECT = 0x134e4e8, UI_NOTHING = 0x134e610 };
-static _Atomic uint64_t g_unfocus_obj; static int g_letgo;
-static _Atomic int g_pointer_rules;     /* the mouse has the say (frontend.m): no selection but the one it asks for */
-static _Atomic uint64_t g_asked;        /* the element the pointer asked for */
-static _Atomic int g_unfocus_next;   /* the next cursor step (any menu) starts with nothing selected */   /* g_letgo: the update's thread, between the two sites */
-void runtime_ui_select(uint64_t element) {
-    uint64_t obj = cursor_object(); if (!obj) return;
-    atomic_store(&g_unfocus_next, 0); atomic_store(&g_unfocus_obj, 0); atomic_store(&g_asked, element); *(volatile uint64_t *)(uintptr_t)(obj + 0x50) = element;
+       UI_DESELECT = 0x134e4e8, UI_NOTHING = 0x134e610, UI_ENSURE_SKIP = 0x134f194 };
+static int g_letgo;                     /* the update's thread, between the two sites */
+static _Atomic int g_mouse_rules;       /* the mouse has the say */
+static _Atomic uint64_t g_asked;        /* what it wants selected, 0 for nothing */
+void runtime_ui_select(uint64_t element) {   /* frontend.m: the element under the pointer, 0 for none */
+    uint64_t obj = cursor_object(); atomic_store(&g_asked, element);
+    if (obj && element) *(volatile uint64_t *)(uintptr_t)(obj + 0x50) = element;
 }
-void runtime_ui_pointer_rules(int on) { atomic_store(&g_pointer_rules, on); if (!on) atomic_store(&g_asked, 0); }
-void runtime_ui_unfocus_next(void) { atomic_store(&g_unfocus_next, 1); g_last_group = 0; }   /* frontend.m: while no menu is open (its groups made anew next time) */
-void runtime_ui_unfocus(void) { atomic_store(&g_unfocus_obj, cursor_object()); }
-void runtime_ui_refocus(void) { atomic_store(&g_unfocus_next, 0); atomic_store(&g_unfocus_obj, 0); }
-int runtime_ui_unfocused(void) {   /* the menu's cursor has nothing selected (let go for the pointer, or its own pick dropped) */
-    uint64_t o = atomic_load(&g_unfocus_obj), c = cursor_object(), sel = 1;
-    if (o && o == c) return 1;
-    return c && atomic_load(&g_pointer_rules) && camdump_read(c + 0x48, &sel, 8) && !sel;
-}
+void runtime_ui_mouse_rules(int on) { atomic_store(&g_mouse_rules, on); }
 static int ui_nav_hook(ucontext_t *u) {
-    uint64_t *x = u->uc_mcontext->__ss.__x, pc = u->uc_mcontext->__ss.__pc - (uintptr_t)g_nav_main, sel = 0;
-    if (atomic_exchange(&g_unfocus_next, 0) && runtime_mouse_enabled()) atomic_store(&g_unfocus_obj, x[19]);   /* a menu opening:
-        nothing selected from its first step, before its own pick shows (user 2026-10-29); the pointer then asks for what it is on */
+    uint64_t *x = u->uc_mcontext->__ss.__x, pc = u->uc_mcontext->__ss.__pc - (uintptr_t)g_nav_main, sel = 0, pend = 0;
     if (pc == UI_LETGO_SITE) {
         if (g_letgo) { g_letgo = 0; u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + UI_NOTHING; return 1; }
         if (!x[20]) u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + 0x134e530; else u->uc_mcontext->__ss.__pc += 4;
         return 1;
     }
     camdump_read(x[19] + 0x48, &sel, 8);
-    if (atomic_load(&g_pointer_rules) && runtime_mouse_enabled()) {   /* the mouse has the say: the game's own picks (a screen
-        opening asks for its first item, +0x50; with none selected it picks one) are dropped, only the pointer's stand */
-        uint64_t pend = 0, asked = atomic_load(&g_asked); camdump_read(x[19] + 0x50, &pend, 8);
-        if (pend && pend != asked) { *(volatile uint64_t *)(uintptr_t)(x[19] + 0x50) = 0; pend = 0; }
-        if (sel && sel != asked && !pend && x[19] == cursor_object()) atomic_store(&g_unfocus_obj, x[19]);   /* one it picked: let go (not while the pointer's request waits: it replaces it) */
-        if (!sel && !pend) {
-            u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + (pc == UI_ENSURE_SITE ? 0x134f194 : UI_NOTHING); return 1;
-        }
-    }
-    if (pc == UI_ENSURE_SITE) {   /* the other per-frame step that picks one when none is selected (main+0x134f100) */
-        if (x[19] == atomic_load(&g_unfocus_obj) && !sel) u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + 0x134f194;   /* none: it stays none
-            (one still selected is let go by the update, the game's way, so its highlight goes too: 2026-10-29 two shown at once) */
-        else { x[0] = sel; u->uc_mcontext->__ss.__pc += 4; }
-        return 1;
-    }
-    if (x[19] == atomic_load(&g_unfocus_obj)) {
-        if (sel) {   /* let it go the game's way, then nothing selected */
+    if (atomic_load(&g_mouse_rules) && runtime_mouse_enabled() && x[19] == cursor_object()) {
+        uint64_t want = atomic_load(&g_asked); camdump_read(x[19] + 0x50, &pend, 8);
+        if (pend && pend != want) { camdump_read(pend + 0x20, &g_last_group, 8); *(volatile uint64_t *)(uintptr_t)(x[19] + 0x50) = 0; pend = 0; }
+        if (sel && sel != want && !pend) {   /* not the pointer's: let go, the game's way (its highlight goes too) */
+            camdump_read(sel + 0x20, &g_last_group, 8);
+            if (pc == UI_ENSURE_SITE) { x[0] = sel; u->uc_mcontext->__ss.__pc += 4; return 1; }   /* the update lets it go */
             *(volatile uint64_t *)(uintptr_t)(x[19] + 0x48) = 0; x[21] = sel; g_letgo = 1;
             u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + UI_DESELECT; return 1;
         }
-        u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + UI_NOTHING; return 1;
+        if (!sel && !pend) { u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + (pc == UI_ENSURE_SITE ? UI_ENSURE_SKIP : UI_NOTHING); return 1; }
     }
     x[0] = sel; u->uc_mcontext->__ss.__pc += 4; return 1;
 }

@@ -137,44 +137,23 @@ extern int runtime_inventory_slots(MenuSlot *,int,int *) __attribute__((weak));
 extern int runtime_quest_log_live(void) __attribute__((weak));
 /* The pause menu's inventory or Adventure Log is open (the System tab has no sign here: from it Q goes back). */
 static int pause_tabs_open(void){if(runtime_game_world_live&&runtime_game_world_live())return 0;if(runtime_quest_log_live&&runtime_quest_log_live())return 1;MenuSlot slots[MENU_SLOTS_MAX];int sel;return runtime_inventory_slots&&runtime_inventory_slots(slots,MENU_SLOTS_MAX,&sel)>0;}
-/* In the pause menu: its tabs were seen since the world last went on (inside it, in the item popup or while rotating
-   Link, the tabs have no sign, and nothing else stops the world there). */
-static int pause_menu_open(void){static int open;if(runtime_game_world_live&&runtime_game_world_live())open=0;else if(pause_tabs_open())open=1;return open;}
-static dispatch_source_t pauseWatch;
-__attribute__((constructor)) static void pause_menu_watch(void){   /* a popup opened with a click, before any key: still seen */
- pauseWatch=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
- dispatch_source_set_timer(pauseWatch,DISPATCH_TIME_NOW,100*NSEC_PER_MSEC,20*NSEC_PER_MSEC);dispatch_source_set_event_handler(pauseWatch,^{pause_menu_open();});dispatch_resume(pauseWatch);}
 static unsigned escAs,enterAs,eAs,spaceAs,vAs;
-static int titleMode;   /* the pointer in a menu of the game (title_tick): the title, or a menu with a selection frame */
+/* The one state of the mouse in menus (title_tick decides it every 8 ms; user 2026-10-29: as simple as that):
+   uiMenu   a menu's items are on screen (runtime_ui_hits): the pointer is shown and is the selection;
+   mouseHeld the mouse turns the camera (the world playing, no menu): the pointer hidden where it is, never moved;
+   keysLead a key walked the menu: the game's own selection until the mouse moves again. */
+static int uiMenu,keysLead;
 extern int runtime_ui_hits(MenuHit *,int,int *) __attribute__((weak));extern void runtime_ui_select(uint64_t) __attribute__((weak));
-extern void runtime_ui_unfocus(void) __attribute__((weak));extern int runtime_ui_unfocused(void) __attribute__((weak));   /* game_patches_botw.c: the menu cursor's elements */
-extern void runtime_ui_refocus(void) __attribute__((weak));   /* game_patches_botw.c: a selection given back */
-static float lastSelX=1e9f,lastSelY=1e9f;   /* where the selection last was (title_tick): the page the keys go on with */
-static NSPoint title_pointer(NSView *v);
-/* A key with nothing selected (the pointer on nothing): a selection given back, chosen here, not by the game (it took
-   the first page's first item, 2026-10-29): the item under the pointer, else the one nearest where the selection was. */
-static void give_back(void){
- MenuHit h[64];int sel,n=runtime_ui_hits?runtime_ui_hits(h,64,&sel):0,best=-1;double bd=1e18;
- if(n>0&&window){NSView *v=window.contentView;NSPoint p=title_pointer(v);double w=v.bounds.size.width,hh=v.bounds.size.height,sc=fmin(w/1280,hh/720);
-  best=menu_hit_at(h,n,(p.x-(w-1280*sc)/2)/sc-640,(p.y-(hh-720*sc)/2)/sc-360);
-  for(int i=0;best<0&&i<n;i++){double d=(h[i].x-lastSelX)*(h[i].x-lastSelX)+(h[i].y-lastSelY)*(h[i].y-lastSelY);if(d<bd){bd=d;}}
-  if(best<0)for(int i=0;i<n;i++){double d=(h[i].x-lastSelX)*(h[i].x-lastSelX)+(h[i].y-lastSelY)*(h[i].y-lastSelY);if(d<=bd){best=i;break;}}}
- if(best>=0&&runtime_ui_select)runtime_ui_select(h[best].id);else if(runtime_ui_refocus)runtime_ui_refocus();}
-static int keysLead;   /* a key walked the menu since the pointer last moved (title_tick hands it to game_patches_botw.c) */
-static int mouseLast;   /* the pointer moved since the last key: the frame follows it (title_tick) */
+extern void runtime_ui_mouse_rules(int) __attribute__((weak));   /* game_patches_botw.c */
 static int in_menu(void){return runtime_game_world_live&&!runtime_game_world_live();}
 enum{KEY_NONE=255,KEY_SKIP=254};   /* runtime_input_key ignores them; KEY_SKIP: J (A) and I (X) together */
-extern int runtime_title_cursor(void) __attribute__((weak));
-static unsigned space_key(void){int r=space_role(!runtime_game_world_live||runtime_game_world_live(),runtime_title_cursor&&runtime_title_cursor()>=0,pause_menu_open());
- return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
+static int world_on(void){return !runtime_game_world_live||runtime_game_world_live();}
+static unsigned space_key(void){int r=space_role(world_on(),0,uiMenu);return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
 /* A window key after the settings panel: what it presses depends on where the game is (above). */
-static uint64_t menuClosing;   /* Esc on the pause menu's page (not a popup): it is closing, the pointer goes at once (title_tick) */
 static void front_key_down(unsigned short code,int repeat){
- if(code==53&&!repeat&&pause_menu_open()){MenuHit h[16];int sel,n=runtime_ui_hits?runtime_ui_hits(h,16,&sel):0;if(n>4)menuClosing=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);}
- if(code!=53&&code!=48&&code!=12&&code!=14&&code!=36&&code!=49)keysLead=1;   /* a key that walks the menu (not Esc, Tab, Q, E, Enter, Space): the game picks again */
- if(mouseLast&&code!=53&&code!=48&&code!=12&&code!=14){mouseLast=0;if(runtime_ui_unfocused&&runtime_ui_unfocused())give_back();else if(runtime_ui_refocus)runtime_ui_refocus();}   /* the keyboard: a selection again; not for Esc (it closes, user 2026-10-29: given back first it showed Cancel taken), Tab, Q, E */
+ if(code!=53&&code!=48&&code!=12&&code!=14&&code!=36&&code!=49&&!(code>=18&&code<=29))keysLead=1;   /* a key that walks the menu (not Esc, Tab, Q, E, Enter, Space, digits) */
  if(code==56&&in_menu())return;   /* Shift in a menu: nothing (only Esc goes back) */
- if(code==53){if(!repeat)escAs=esc_is_plus(!runtime_game_world_live||runtime_game_world_live(),(runtime_title_cursor&&runtime_title_cursor()>=0)||(titleMode&&!titleFree),pause_menu_open())?53:56;runtime_input_key(escAs,1);return;}
+ if(code==53){if(!repeat)escAs=esc_is_plus(world_on(),0,uiMenu)?53:56;runtime_input_key(escAs,1);return;}   /* a menu: back; else + */
  if(code==14){if(!repeat)eAs=pause_tabs_open()?59:in_menu()?KEY_NONE:14;runtime_input_key(eAs,1);return;}   /* E in the pause menu: the next tab (R, Control), as Q (L) the one before; A in the world */
  if(code==9){if(!repeat)vAs=pause_tabs_open()?32:9;runtime_input_key(vAs,1);return;}   /* V in the inventory: sort (Y, U; the left click is A there); the d-pad's down elsewhere */
  if(code==49){if(!repeat){spaceAs=space_key();fprintf(stderr,"[totk-input] Space: %s\n",spaceAs==KEY_SKIP?"A and X (cutscene, dialog)":spaceAs==38?"A (menu)":"X (world)");}if(spaceAs==KEY_SKIP){runtime_input_key(38,1);runtime_input_key(34,1);}else runtime_input_key(spaceAs,1);return;}   /* space_skip.h */
@@ -214,50 +193,35 @@ static void caps_hid_start(void){
 -(void)flagsChanged:(NSEvent *)e{NSEventModifierFlags f=e.modifierFlags;unsigned k=e.keyCode;
  int down=k==56?!!(f&NSEventModifierFlagShift):k==58?!!(f&NSEventModifierFlagOption):k==59?!!(f&NSEventModifierFlagControl):k==57&&!capsHid?!!(f&NSEventModifierFlagCapsLock):-1;
  if(down>=0&&(!settingsOpen||!down))mapped_key(k,down,0);}
-/* The game has no mouse controls. In native full screen, keep the pointer out of the picture while idle, but show it again
-   as soon as it moves; restore it when the window loses focus or leaves full screen. */
+/* The game has no mouse controls. With mouse mode off, in native full screen, the pointer is kept out of the picture while
+   idle and shown again as soon as it moves; with mouse mode on, title_tick alone shows or hides it. */
 void runtime_input_key_synthetic(unsigned code,int down);
-static int titleFrame,titleFree,titleTarget=-1,titleConfirm,titleScroll,titleFollow;   /* titleScroll: wheel steps to make (+ down); titleFollow: the pointer moved, follow it */
-static unsigned titleKey;static NSCursor *titleCursor;   /* titleFrame: a menu with the selection frame */
--(void)resetCursorRects{if(titleMode&&titleCursor)[self addCursorRect:self.bounds cursor:titleCursor];else [super resetCursorRects];}   /* the title menu's pointer, kept by AppKit */
+static unsigned clickKey;   /* a synthetic press, let go at the next tick */
+static void press(unsigned code){if(clickKey)return;clickKey=code;runtime_input_key_synthetic(code,1);}
 -(void)hideCursorIfIdle:(NSTimer *)timer{
  (void)timer;self.cursorHideTimer=nil;
- if(titleFree&&self.window.isKeyWindow){set_cursor_hidden(YES);return;}   /* a cutscene: the free pointer out of the picture while idle */
- if(titleMode)return;
- if(!self.cursorAutoHideActive||!self.window.isKeyWindow||!(self.window.styleMask&NSWindowStyleMaskFullScreen))return;
+ if(runtime_mouse_enabled()||!self.cursorAutoHideActive||!self.window.isKeyWindow||!(self.window.styleMask&NSWindowStyleMaskFullScreen))return;
  set_cursor_hidden(YES);
 }
-/* The title menu with the mouse (menu_pointer.h): mouse mode lets the pointer go there, the item under it is walked to
-   with the d-pad (title_tick) and a click confirms it (A). */
-extern int runtime_title_count(void) __attribute__((weak));
-static int title_count(void){   /* 5, or 6 with the DLC: the title's arrow anchors, one more than its items (the arrow's
- own place tells it too, runtime_title_count, but it is not shown while nothing is selected) */
- extern int runtime_ui_elements(MenuHit *,int,int *) __attribute__((weak));MenuHit h[16];int sel;
- int n=runtime_ui_elements?runtime_ui_elements(h,16,&sel):0;if(n==6||n==7)return n-1;
- return runtime_title_count?runtime_title_count():5;}
-static int title_item_at(NSView *v,NSEvent *e){NSPoint p=[v convertPoint:e.locationInWindow fromView:nil];NSSize s=v.bounds.size;return menu_title_item(s.width,s.height,p.x,p.y,title_count());}
 -(void)mouseMoved:(NSEvent *)e{
  if(mouseHeld){runtime_mouse_move(e.deltaX,e.deltaY);return;}
- if(titleMode){titleFollow=2;
-  [self.cursorHideTimer invalidate];self.cursorHideTimer=nil;   /* shown or not: title_tick */
-  if(titleFree)self.cursorHideTimer=[NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(hideCursorIfIdle:) userInfo:nil repeats:NO];
-  int i=titleFree?-1:title_item_at(self,e);titleTarget=i;if(titleCursor)[titleCursor set];return;}
- if(!self.cursorAutoHideActive)return;
- [self.cursorHideTimer invalidate];self.cursorHideTimer=nil;
- if(!mouseHeld)set_cursor_hidden(NO);
+ keysLead=0;   /* the mouse has the say again */
+ if(runtime_mouse_enabled()||!self.cursorAutoHideActive)return;
+ [self.cursorHideTimer invalidate];set_cursor_hidden(NO);
  self.cursorHideTimer=[NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(hideCursorIfIdle:) userInfo:nil repeats:NO];
 }
+static void menu_scroll(int steps);
 -(void)scrollWheel:(NSEvent *)e{   /* by notches (menu_wheel): a notch of the wheel is one step */
  static MenuWheel wheel;if(e.momentumPhase!=NSEventPhaseNone)return;
  int steps=menu_wheel(&wheel,e.timestamp,e.deltaY);if(!steps)return;
- if(titleMode&&!mouseHeld){titleScroll+=steps;titleFollow=0;return;}
- if(mouseHeld){extern void runtime_mouse_wheel(int);runtime_mouse_wheel(steps);}}
+ if(mouseHeld){extern void runtime_mouse_wheel(int);runtime_mouse_wheel(steps);}else menu_scroll(steps);}
 -(void)mouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
 -(void)rightMouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
 -(void)otherMouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
--(void)mouseDown:(NSEvent *)e{if(titleMode&&!mouseHeld){int i=titleFrame||titleFree?-1:title_item_at(self,e);if(titleFrame||titleFree||i>=0){titleTarget=i;titleConfirm=1;titleFollow=1;}return;}if(mouseHeld)runtime_mouse_button(0,1);}
+static void menu_click(void);
+-(void)mouseDown:(NSEvent *)e{(void)e;if(mouseHeld)runtime_mouse_button(0,1);else if(runtime_mouse_enabled())menu_click();}
 -(void)mouseUp:(NSEvent *)e{(void)e;runtime_mouse_button(0,0);}
--(void)rightMouseDown:(NSEvent *)e{(void)e;if(titleMode&&!mouseHeld){if(!titleKey){titleKey=56;runtime_input_key_synthetic(56,1);}return;}if(mouseHeld)runtime_mouse_button(1,1);}   /* menus: B */   /* no context menu */
+-(void)rightMouseDown:(NSEvent *)e{(void)e;if(mouseHeld)runtime_mouse_button(1,1);else if(runtime_mouse_enabled())press(56);}   /* off the camera: B */   /* no context menu */
 -(void)rightMouseUp:(NSEvent *)e{(void)e;runtime_mouse_button(1,0);}
 -(void)otherMouseDown:(NSEvent *)e{if(mouseHeld)runtime_mouse_button((int)e.buttonNumber,1);}   /* 2 middle, 3 and 4 the side buttons */
 -(void)otherMouseUp:(NSEvent *)e{runtime_mouse_button((int)e.buttonNumber,0);}
@@ -267,137 +231,51 @@ static int title_item_at(NSView *v,NSEvent *e){NSPoint p=[v convertPoint:e.locat
  if(enabled){
   self.window.acceptsMouseMovedEvents=YES;
   self.cursorHideTimer=[NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(hideCursorIfIdle:) userInfo:nil repeats:NO];
- }else{
-  if(!mouseHeld)set_cursor_hidden(NO);
-  self.window.acceptsMouseMovedEvents=mouseHeld;
- }
+ }else if(!runtime_mouse_enabled())set_cursor_hidden(NO);
 }
 @end
-extern int runtime_title_cursor(void) __attribute__((weak));
-extern int runtime_menu_frame(float r[4]) __attribute__((weak));
-void runtime_title_target(int i){dispatch_async(dispatch_get_main_queue(),^{titleTarget=i;});}   /* tests: "titlego <item>" */
-static NSPoint fakePointer;static int fakePointerOn;   /* tests: "pointer <x> <y>" (view points, y up) stands for the mouse */
-static NSPoint title_pointer(NSView *v){return fakePointerOn?fakePointer:[v convertPoint:v.window.mouseLocationOutsideOfEventStream fromView:nil];}
-void runtime_menu_pointer(double lx,double ly){dispatch_async(dispatch_get_main_queue(),^{   /* layout units (1280x720, centre 0,0) */
+static NSPoint fakePointer;static int fakePointerOn;   /* tests: "pointer <x> <y>" (layout units) stands for the mouse */
+static NSPoint menu_pointer_view(NSView *v){return fakePointerOn?fakePointer:[v convertPoint:v.window.mouseLocationOutsideOfEventStream fromView:nil];}
+static void pointer_layout(double *lx,double *ly){   /* the pointer in layout units (1280x720 shown aspect-fit, centre 0,0, y up) */
+ NSView *v=window.contentView;NSPoint p=menu_pointer_view(v);double w=v.bounds.size.width,h=v.bounds.size.height,sc=fmin(w/1280,h/720);
+ *lx=(p.x-(w-1280*sc)/2)/sc-640;*ly=(p.y-(h-720*sc)/2)/sc-360;}
+void runtime_menu_pointer(double lx,double ly){dispatch_async(dispatch_get_main_queue(),^{
  NSSize z=window.contentView.bounds.size;double s=fmin(z.width/1280,z.height/720);
- fakePointer=NSMakePoint((z.width-1280*s)/2+(lx+640)*s,(z.height-720*s)/2+(ly+360)*s);fakePointerOn=1;titleFollow=2;});}
-void runtime_menu_wheel(int n){dispatch_async(dispatch_get_main_queue(),^{titleScroll+=n;titleFollow=0;});}   /* tests: "wheel <notches>" */
-/* The title's items are the cursor's elements too (game_patches_botw.c runtime_ui_hits, top to bottom by place): the
-   item under the pointer is asked of the game (runtime_ui_select), which selects it at its next frame. */
-static int title_select(int item){
- extern int runtime_ui_elements(MenuHit *,int,int *) __attribute__((weak));
- if(!runtime_ui_elements||!runtime_ui_select)return 0;
- MenuHit h[16];int sel,n=runtime_ui_elements(h,16,&sel);if(n<title_count())return 0;   /* not the title's items (it has one element more, below them) */
- for(int i=1;i<n;i++)for(int j=i;j>0&&h[j].y>h[j-1].y;j--){MenuHit t=h[j];h[j]=h[j-1];h[j-1]=t;}
- if(item<0||item>=n)return 0;runtime_ui_select(h[item].id);return 1;}
-static uint64_t freeTick;   /* title_tick: the last tick with no menu (FREE) */
-static void title_tick(void){   /* main thread, every 8 ms */
- if(!mouseHeld&&!titleMode)front_mouse_update();   /* the world waiting for the pointer to come onto the game */
- {static NSPoint seen;NSPoint m=NSEvent.mouseLocation;if(m.x!=seen.x||m.y!=seen.y||(fakePointerOn&&titleFollow==2)){seen=m;keysLead=0;}
-  extern void runtime_ui_pointer_rules(int) __attribute__((weak));if(runtime_ui_pointer_rules)runtime_ui_pointer_rules(!keysLead);}   /* the mouse has the say unless a key took it */
- if(titleKey){runtime_input_key_synthetic(titleKey,0);titleKey=0;return;}   /* the press stays pending until the game reads it */
- int on=runtime_mouse_enabled()&&!settingsOpen;float fr[4];
-extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) shows the same frame: not a pointer menu */
- int world=!runtime_game_world_live||runtime_game_world_live();
- int cur=on&&runtime_title_cursor?runtime_title_cursor():-1;
- if(cur<0&&on&&!world&&runtime_ui_unfocused&&runtime_ui_unfocused()){   /* the title with nothing selected (no arrow): its anchors, */
-  extern int runtime_ui_elements(MenuHit *,int,int *) __attribute__((weak));MenuHit h[16];int sel,k=0;   /* off the screen's units */
-  int n=runtime_ui_elements?runtime_ui_elements(h,16,&sel):0;for(int i=0;i<n;i++)k+=fabsf(h[i].x-991)<2;if(k>=5)cur=0;}   /* at x 991 (menu_pointer.h) */
- int frame=cur<0&&on&&!runtime_input_dpad_held()&&runtime_menu_frame&&runtime_menu_frame(fr);
- if(cur>=0&&on&&!world){MenuHit h[4];int sel;if(runtime_ui_hits&&runtime_ui_hits(h,4,&sel)>0){cur=-1;frame=1;}}
- if(frame){MenuHit h[4];int sel;if(!(runtime_ui_hits&&runtime_ui_hits(h,4,&sel)>0))frame=0;}   /* a frame left drawn with no items on screen (a menu
-   closing, fading out) is no menu: no pointer, the mouse back to the camera (2026-10-29: the pointer stayed a second on the world) */   /* items on screen over the title (the save list): that menu */
- {static float lastFr[4];static int lastCur=-1;   /* nothing selected (the pointer on nothing, or a request refused): no frame, no title */
-  if(frame){memcpy(lastFr,fr,sizeof lastFr);lastCur=-1;}   /* arrow, but still the same menu: told by its items on screen */
-  else if(cur>=0)lastCur=cur;
-  else if(on&&!world){MenuHit h[4];int sel;
-   if(runtime_ui_hits&&runtime_ui_hits(h,4,&sel)>0){frame=1;memcpy(fr,lastFr,sizeof lastFr);lastCur=-1;}   /* items on screen: that menu */
-   else if(lastCur>=0)cur=lastCur;}   /* none (the title's anchors are off the screen's units): still the title */
-  if(world)lastCur=-1;}
- int pm=menu_pointer_mode(on,cur,frame,world),mode=pm>=MENU_POINTER_TITLE;
- {static int lastPm=-1;if(pm!=lastPm&&getenv("TOTK_DEBUG_LOG"))fprintf(stderr,"[totk] menu pointer kind %d -> %d (title item %d, frame %d, world %d)\n",lastPm,pm,cur,frame,world);lastPm=pm;}
- if(on&&window.isKeyWindow){BOOL onGame=mouseHeld||NSPointInRect(NSEvent.mouseLocation,[window convertRectToScreen:window.contentView.frame]);
-  int closing=menuClosing&&!world&&clock_gettime_nsec_np(CLOCK_UPTIME_RAW)-menuClosing<2000000000ull;if(world)menuClosing=0;
-  set_cursor_hidden(onGame&&(closing||!((pm==MENU_POINTER_TITLE||pm==MENU_POINTER_FRAME)&&!mouseHeld)));}   /* the pointer only on a menu's items:
-   the game playing, loading or fading out of a menu shows none (user 2026-10-29), at once, whatever the mouse's hold waits
-   for; off the game's window (another screen) it is the Mac's */
- titleFrame=frame;titleFree=pm==MENU_POINTER_FREE;
- {static uint64_t offAt;uint64_t t=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);   /* the world going on a moment (a menu's camera, a page */
-  if(mode)offAt=0;                                                               /* turning): the pointer mode holds through it, so the */
-  else if(titleMode){if(!offAt)offAt=t;if(t-offAt<500000000ull)return;}}   /* pointer is not taken and given back every time;
-     a menu closing hides it at once (user 2026-10-29: it stayed a second); a move shows it again */
- if(mode!=titleMode){titleMode=mode;titleTarget=-1;titleConfirm=0;front_mouse_update();
-  if(mode){mouseLast=1;titleFollow=2;}   /* a menu opening: the pointer has the say at once (nothing selected unless it is on an item) */
-  if(mode){if(!titleCursor){char path[4096];extern int runtime_setting_path(const char *,char *,size_t);NSImage *im=runtime_setting_path("cursor.png",path,sizeof path)?[[NSImage alloc] initWithContentsOfFile:@(path)]:nil;
-    if(im){im.size=NSMakeSize(24,24*im.size.height/fmax(1,im.size.width));titleCursor=[[NSCursor alloc] initWithImage:im hotSpot:NSMakePoint(1,1)];}else titleCursor=NSCursor.arrowCursor;}
-   [titleCursor set];window.acceptsMouseMovedEvents=YES;}   /* the hover needs moves in a window too */
-  [window invalidateCursorRectsForView:window.contentView];
-  fprintf(stderr,"[totk] menu pointer: %s\n",mode?(frame?"a menu with the selection frame":titleFree?"free (the world stopped)":"the title menu"):"off");}
- if(!mode){titleScroll=0;mouseLast=0;extern void runtime_ui_unfocus_next(void) __attribute__((weak));
-  if(runtime_ui_unfocus_next)runtime_ui_unfocus_next();   /* no menu: the next one starts with nothing selected */
-  return;}
- if(titleFree){titleScroll=0;   /* the map, a dialog: a click is A, unless the screen has items and it is on none */
-  {static uint64_t since;uint64_t t=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);if(!freeTick||t-freeTick>50000000ull)since=t;freeTick=t;   /* no menu for a while */
-   extern void runtime_ui_unfocus_next(void) __attribute__((weak));if(t-since>300000000ull&&runtime_ui_unfocus_next)runtime_ui_unfocus_next();}   /* (loading, the title coming in; not a menu's moment between frames): the next starts with nothing selected */
-  if(titleConfirm){titleConfirm=0;MenuHit h[MENU_SLOTS_MAX];int sel,n=runtime_ui_hits?runtime_ui_hits(h,MENU_SLOTS_MAX,&sel):0;
-   NSView *v=window.contentView;NSPoint p=title_pointer(v);double w=v.bounds.size.width,hh=v.bounds.size.height,sc=fmin(w/1280,hh/720);
-   if(!n||menu_hit_at(h,n,(p.x-(w-1280*sc)/2)/sc-640,(p.y-(hh-720*sc)/2)/sc-360)>=0){titleKey=38;runtime_input_key_synthetic(38,1);}}
-  return;}
- {static NSPoint last;NSPoint m=NSEvent.mouseLocation;   /* the pointer read here too: moves are not always delivered after a screen change */
-  if(m.x!=last.x||m.y!=last.y||(fakePointerOn&&titleFollow==2)){last=m;titleFollow=2;   /* (tests: "pointer" moves the stand-in) */
-   if(!frame){NSView *v=window.contentView;NSPoint p=title_pointer(v);
-    int i=menu_title_item(v.bounds.size.width,v.bounds.size.height,p.x,p.y,title_count());titleTarget=i;   /* -1 off the items: none asked again */
-    mouseLast=1;if(i<0&&runtime_ui_unfocus&&!(runtime_ui_unfocused&&runtime_ui_unfocused()))runtime_ui_unfocus();}}}   /* on nothing: nothing selected */
- if(frame){   /* a menu with the cursor's elements (menu_grid.h MenuHit): the one under the pointer is asked of the game
-                (runtime_ui_select), on none nothing is selected (runtime_ui_unfocus); a click on the selected one is A */
-  uint64_t now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  
-  
-  static MenuHit hits[MENU_SLOTS_MAX];static int hwait;static uint64_t huntil,hasked,hfirst;
-  int hsel=-1,hn=runtime_ui_hits?runtime_ui_hits(hits,MENU_SLOTS_MAX,&hsel):0,inv=0;
-  for(int i=0;i<hn;i++)inv+=fabsf(hits[i].w-90)<6&&fabsf(hits[i].h-90)<6;inv=inv>=2;   /* the inventory: its 90 x 90 slots (the frame is gone with nothing selected) */
-  if(inv){int k=0,ks=-1;for(int i=0;i<hn;i++){if(hits[i].x<MENU_GRID_PAGE_LEFT_X-10||hits[i].x>MENU_GRID_PAGE_RIGHT_X+10)continue;   /* the inventory: its page only */
-    if(i==hsel)ks=k;hits[k++]=hits[i];}hsel=ks;hn=k;}
-  if(runtime_ui_unfocused&&runtime_ui_unfocused())hsel=-1;   /* nothing selected: the frame's place is the last one's */
-  NSView *v=window.contentView;NSPoint p=title_pointer(v);double w=v.bounds.size.width,h=v.bounds.size.height,sc=fmin(w/1280,h/720);
-  double lx=(p.x-(w-1280*sc)/2)/sc-640,ly=(p.y-(h-720*sc)/2)/sc-360;
-  extern void runtime_inventory_page(int);   /* the wheel moves no selection (user 2026-10-29), only the inventory's pages */
-  if(titleScroll){if(inv)runtime_inventory_page(titleScroll);titleScroll=0;titleFollow=1;return;}
-  if(hsel>=0){lastSelX=hits[hsel].x;lastSelY=hits[hsel].y;}
-  int target=menu_hit_at(hits,hn,lx,ly);
-  if(titleFollow==2){titleFollow=1;mouseLast=1;hwait=0;hasked=0;}
-  if(target<0){   /* on nothing: nothing selected; a click beside the inventory's page turns it */
-   if(titleConfirm&&inv&&(lx<MENU_GRID_PAGE_LEFT_X||lx>MENU_GRID_PAGE_RIGHT_X)&&fabs(ly)<260)runtime_inventory_page(lx<MENU_GRID_PAGE_LEFT_X?-1:1);
-   titleConfirm=0;if(mouseLast&&hsel>=0&&runtime_ui_unfocus)runtime_ui_unfocus();return;}
-  if(target==hsel){titleFollow=0;hwait=0;if(titleConfirm){titleConfirm=0;titleKey=38;runtime_input_key_synthetic(38,1);}return;}
-  if(!titleFollow&&!titleConfirm)return;   /* the mouse did not move since (the keyboard may be in use) */
-  if(hwait&&now<huntil)return;   /* asked for it already */
-  if(hasked!=hits[target].id){hasked=hits[target].id;hfirst=now;}
-  if(now-hfirst>600000000ull){   /* refused for long (the Adventure Log's rows: their group is left out of requests; a page
-     turning refuses only a moment, asked again meanwhile): a row a d-pad step there, from the selection (given back
-     first if there is none) */
-   if(hsel<0){give_back();huntil=now+100000000ull;return;}
-   static const unsigned dpad[5]={0,5,9,3,11};titleKey=dpad[menu_hit_step(hits,hsel,target)];
-   if(titleKey)runtime_input_key_synthetic(titleKey,1);huntil=now+120000000ull;return;}
-  if(runtime_ui_select){runtime_ui_select(hits[target].id);hwait=1;huntil=now+150000000ull;}   /* selected at the game's next frame */
-  return;
- }
- titleScroll=0;   /* the title: its item under the pointer asked of the game (its places are the title's own, menu_title_item) */
- if(titleFollow&&titleTarget>=0&&(titleTarget!=cur||(runtime_ui_unfocused&&runtime_ui_unfocused()))){title_select(titleTarget);titleFollow=0;}
- else if(titleConfirm&&titleTarget==cur){titleConfirm=0;titleKey=38;runtime_input_key_synthetic(38,1);}   /* J: A */
+ fakePointer=NSMakePoint((z.width-1280*s)/2+(lx+640)*s,(z.height-720*s)/2+(ly+360)*s);fakePointerOn=1;keysLead=0;});}
+void runtime_menu_wheel(int n){dispatch_async(dispatch_get_main_queue(),^{menu_scroll(n);});}   /* tests: "wheel <notches>" */
+static MenuHit uiHits[MENU_SLOTS_MAX];static int uiN,uiInventory;   /* this tick's boxes (title_tick) */
+static int menu_target(void){double lx,ly;pointer_layout(&lx,&ly);return menu_hit_at(uiHits,uiN,lx,ly);}
+static void menu_scroll(int steps){   /* the wheel moves no selection (user 2026-10-29): the inventory's pages only */
+ extern void runtime_inventory_page(int);if(uiMenu&&uiInventory)runtime_inventory_page(steps);}
+static void menu_click(void){   /* the left button off the camera: A on the item under the pointer; beside the inventory's
+ page its page turn; off the items nothing; where there are no items (a dialog, a cutscene) A */
+ if(!uiMenu){press(38);return;}
+ if(menu_target()>=0){press(38);return;}
+ double lx,ly;pointer_layout(&lx,&ly);extern void runtime_inventory_page(int);
+ if(uiInventory&&(lx<MENU_GRID_PAGE_LEFT_X||lx>MENU_GRID_PAGE_RIGHT_X)&&fabs(ly)<260)runtime_inventory_page(lx<MENU_GRID_PAGE_LEFT_X?-1:1);}
+static void title_tick(void){   /* main thread, every 8 ms: the three answers, nothing else */
+ if(clickKey){runtime_input_key_synthetic(clickKey,0);clickKey=0;}
+ int on=runtime_mouse_enabled()&&!settingsOpen;
+ int hsel=-1;uiN=on&&runtime_ui_hits?runtime_ui_hits(uiHits,MENU_SLOTS_MAX,&hsel):0;
+ uint64_t selId=hsel>=0?uiHits[hsel].id:0;
+ int inv=0;for(int i=0;i<uiN;i++)inv+=fabsf(uiHits[i].w-90)<6&&fabsf(uiHits[i].h-90)<6;uiInventory=inv>=2;   /* its 90 x 90 slots */
+ if(uiInventory){int k=0;for(int i=0;i<uiN;i++)if(uiHits[i].x>=MENU_GRID_PAGE_LEFT_X-10&&uiHits[i].x<=MENU_GRID_PAGE_RIGHT_X+10)uiHits[k++]=uiHits[i];uiN=k;}   /* its page only */
+ int menu=uiN>0;
+ if(menu!=uiMenu){uiMenu=menu;fprintf(stderr,"[totk] menu pointer: %s\n",menu?"a menu":"no menu");}
+ front_mouse_update();
+ if(on&&window.isKeyWindow)set_cursor_hidden(mouseHeld||(!menu&&NSPointInRect(NSEvent.mouseLocation,[window convertRectToScreen:window.contentView.frame])));   /* shown only on a menu; off the game's window it is the Mac's */
+ if(runtime_ui_mouse_rules)runtime_ui_mouse_rules(on&&!keysLead);
+ if(!menu||keysLead||!runtime_ui_select)return;
+ static uint64_t sent=1;int t=menu_target();uint64_t want=t>=0?uiHits[t].id:0;   /* the item under the pointer, or none */
+ if(want!=sent||want!=selId){sent=want;runtime_ui_select(want);}   /* asked again until the game shows it (a page turning refuses a moment) */
 }
-static void front_mouse_update(void){   /* main thread; also runtime/gamepad.m's hook when mouse mode changes */
- BOOL want=window&&runtime_mouse_enabled()&&window.isKeyWindow&&!textEntryOpen&&!settingsOpen&&!titleMode;
- if(want&&!mouseHeld){NSPoint m=NSEvent.mouseLocation;NSRect f=[window convertRectToScreen:window.contentView.frame];
-  if(!NSPointInRect(m,f))want=NO;}   /* the pointer elsewhere (another screen): held only once it is on the game (title_tick looks again) */
+static void front_mouse_update(void){   /* main thread: the mouse on the camera only in the world, with the pointer on the game */
+ BOOL want=window&&runtime_mouse_enabled()&&window.isKeyWindow&&!textEntryOpen&&!settingsOpen&&!uiMenu&&world_on();
+ if(want&&!mouseHeld&&!NSPointInRect(NSEvent.mouseLocation,[window convertRectToScreen:window.contentView.frame]))want=NO;   /* another screen: not taken */
  if(want==mouseHeld)return;
  mouseHeld=want;
- if(want){
-  CGAssociateMouseAndMouseCursorPosition(false);set_cursor_hidden(YES);window.acceptsMouseMovedEvents=YES;   /* the pointer stays where it is, hidden */
- }else{
-  CGAssociateMouseAndMouseCursorPosition(true);set_cursor_hidden(NO);runtime_mouse_release();   /* and shows there again: never moved (user 2026-10-29) */
-  window.acceptsMouseMovedEvents=((TOTKInputView *)window.contentView).cursorAutoHideActive;
- }
+ if(want){CGAssociateMouseAndMouseCursorPosition(false);set_cursor_hidden(YES);window.acceptsMouseMovedEvents=YES;}   /* the pointer stays where it is, hidden */
+ else{CGAssociateMouseAndMouseCursorPosition(true);set_cursor_hidden(NO);runtime_mouse_release();}   /* and shows there again, never moved */
  fprintf(stderr,"[totk] mouse %s\n",want?"held by the window (the settings panel, key 1, or Command-Tab lets it go)":"let go");
 }
 /* Debug: the menu's hit boxes drawn over the picture (TOTK_HITBOXES=1, or input.txt "hitboxes 1"): each element's box
@@ -417,8 +295,8 @@ static TOTKHitBoxes *hitBoxes;
   [c setStroke];NSBezierPath *p=[NSBezierPath bezierPathWithRect:b];p.lineWidth=1.5;[p stroke];}}
 -(void)refresh{
  
- n=runtime_ui_hits&&titleMode?runtime_ui_hits(hits,MENU_SLOTS_MAX,&sel):0;under=-1;
- if(n){NSPoint p=title_pointer(self);NSSize z=self.bounds.size;double sc=fmin(z.width/1280,z.height/720);
+ n=runtime_ui_hits&&uiMenu?runtime_ui_hits(hits,MENU_SLOTS_MAX,&sel):0;under=-1;
+ if(n){NSPoint p=menu_pointer_view(self);NSSize z=self.bounds.size;double sc=fmin(z.width/1280,z.height/720);
   under=menu_hit_at(hits,n,(p.x-(z.width-1280*sc)/2)/sc-640,(p.y-(z.height-720*sc)/2)/sc-360);}
  [self setNeedsDisplay:YES];}
 @end

@@ -233,7 +233,6 @@ static void *input_file(void *arg) {
         } else if (!strncmp(line, "region ", 7)) { extern void botw_region(uint64_t); botw_region(strtoull(line + 7, NULL, 16));
         } else if (!strncmp(line, "pointer ", 8)) { double x = 0, y = 0; sscanf(line + 8, "%lf %lf", &x, &y); extern void runtime_menu_pointer(double, double); runtime_menu_pointer(x, y);
         } else if (!strncmp(line, "wheel ", 6)) { extern void runtime_menu_wheel(int); runtime_menu_wheel(atoi(line + 6));
-        } else if (!strncmp(line, "titlego ", 8)) { extern void runtime_title_target(int); runtime_title_target(atoi(line + 8));
         } else if (!strncmp(line, "poke64 ", 7)) { unsigned long long ad = 0, v = 0; sscanf(line + 7, "%llx %llx", &ad, &v); extern void botw_poke64(uint64_t, uint64_t); botw_poke64(ad, v);
         } else if (!strncmp(line, "panefind ", 9)) { float x = 0, y = 0, t = 1; sscanf(line + 9, "%f %f %f", &x, &y, &t); extern void botw_panefind(float, float, float); botw_panefind(x, y, t);
         } else if (!strncmp(line, "qfind ", 6)) { extern void botw_qfind(uint64_t); botw_qfind(strtoull(line + 6, NULL, 16));

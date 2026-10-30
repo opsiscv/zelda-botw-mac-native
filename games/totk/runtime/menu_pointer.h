@@ -24,6 +24,13 @@ static inline int menu_title_item(double w, double h, double x, double y, int co
     return n;
 }
 
+/* The title's item i of count (5 or 6) as a box for the pointer (game_patches_botw.c ui_hits): its text's left edge
+   *left (it runs to x 590) and its line's middle *y, layout units; as menu_title_item. */
+static inline void menu_title_box(int count, int i, double *left, double *y) {
+    static const double left5[5] = { 493, 477, 505, 513, 378 }, left6[6] = { 471, 487, 405, 510, 523, 448 };
+    *left = count == 6 ? left6[i < 6 ? i : 5] : left5[i < 5 ? i : 4]; *y = (count == 6 ? 20 : 0) - 40.0 * i;
+}
+
 /* The selected item from the cursor corner's position, and how many items the title has; -1 off the title grid. */
 static inline int menu_title_index(float x, float y, int *count) {
     if (fabsf(x - 981) >= 1) return -1;
