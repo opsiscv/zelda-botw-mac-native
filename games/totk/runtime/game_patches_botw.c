@@ -30,9 +30,12 @@ enum { UI_UPDATE_SITE = 0x134e48c, UI_LETGO_SITE = 0x134e4f8, UI_ENSURE_SITE = 0
 static uint8_t *g_horse_ret_main;
 enum { INV_PAGE_SITE = 0x11b66f8, INV_PAGE_WORD = 0xb9761c08, INV_PAGE_TURN = 0x11c1090, INV_PAGE_BACK = 0x11b6fcc };   /* the inventory pages, before botw_jq_hook */
 static uint8_t *g_inv_main; static _Atomic int g_inv_pages;
-enum { QUEST_SITE = 0x11b9b3c, QUEST_WORD = 0xf95dce68 };   /* the pause menu's Adventure Log step (runs while it is open), at ldr x8, [x19, #0x3b98] */
+enum { QUEST_SITE = 0x11b9b3c, QUEST_WORD = 0xf95dce68 };
+enum { SCROLL_SITE = 0x10886fc, SCROLL_WORD = 0xbd038661 };
+static uint8_t *g_scroll_main;   /* a list's scroll step (main+0x10885e0): str s1, [x19, #0x384], its position */   /* the pause menu's Adventure Log step (runs while it is open), at ldr x8, [x19, #0x3b98] */
 static _Atomic uint64_t g_quest_ns;
 static _Atomic int g_quest_tab;
+static _Atomic uint64_t g_quest_list;   /* uilist */
 int runtime_quest_tab(void) { return atomic_load(&g_quest_tab); }   /* the Adventure Log's tab (its list + 0x174, which this step compares with its copy) */
 int runtime_quest_log_live(void) { uint64_t t = atomic_load(&g_quest_ns); return t && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t < 150000000ull; }   /* the Adventure Log is open */
 /* The camera actions' per-frame updates the mouse camera hooks (TOTK_CHASE_HOOK): each starts with sub sp, sp, #frame. */
@@ -654,6 +657,9 @@ void runtime_game_patches(Module *m) {
     { uint32_t w; memcpy(&w, m->base + QUEST_SITE, 4);
       if (w == QUEST_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d8u << 5); memcpy(m->base + QUEST_SITE, &b, 4); }
       fprintf(stderr, "[botw] quest log step: %s\n", w == QUEST_WORD ? "hooked" : "not hooked"); }
+    { uint32_t w; memcpy(&w, m->base + SCROLL_SITE, 4);
+      if (w == SCROLL_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d3u << 5); memcpy(m->base + SCROLL_SITE, &b, 4); g_scroll_main = m->base; }
+      fprintf(stderr, "[botw] list scroll: %s\n", g_scroll_main ? "hooked" : "not hooked"); }
     { uint32_t w; memcpy(&w, m->base + INV_PAGE_SITE, 4);
       if (w == INV_PAGE_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d4u << 5); memcpy(m->base + INV_PAGE_SITE, &b, 4); g_inv_main = m->base; }
       fprintf(stderr, "[botw] inventory pages: %s\n", g_inv_main ? "hooked" : "not hooked"); }
@@ -974,16 +980,40 @@ static int horse_ai_hook(ucontext_t *u) {
     u->uc_mcontext->__ss.__pc += 4; return 1;
 }
 static int ui_nav_hook(ucontext_t *u);
+/* The Adventure Log's list scrolled by the wheel, the selection left alone (user 2026-10-30: the game's own scroll, not a
+   selection walking). A list's scroller (main+0x10885e0, x19; stepped while the list moves) puts its position (+0x384,
+   +0x35c..+0x364 its range) on the list's page pane (Pa_Page_00 +0x34, a parent of the rows ui_hits reads): the scroller
+   at the page's place that has room to scroll is the list's. Its owner (+8) scrolls to a target (+0x2d4; the owner's +0x2c4 is where it is, its
+   scrollers at that less a base): the wheel moves that target a row (70) a notch, and the game scrolls and fills the rows. */
+static _Atomic uint64_t g_list_page;   /* the rows' Pa_Page_00 pane (ui_hits_of) */
+static _Atomic uint64_t g_list_scroller;
+void runtime_list_scroll(int steps) {   /* frontend.m: the wheel's notches */
+    uint64_t sc = atomic_load(&g_list_scroller), owner = 0; float pos, lo, hi, at, target;
+    if (!sc || !runtime_quest_log_live() || !camdump_read(sc + 8, &owner, 8) || !owner || !camdump_read(sc + 0x384, &pos, 4) || !camdump_read(sc + 0x35c, &lo, 4) ||
+        !camdump_read(sc + 0x364, &hi, 4) || !camdump_read(owner + 0x2c4, &at, 4) || !camdump_read(owner + 0x2d4, &target, 4)) return;
+    float base = at - pos, row = roundf((target - base) / 70.0f) + (float)steps;
+    *(volatile float *)(uintptr_t)(owner + 0x2d4) = base + fminf(fmaxf(row * 70.0f, lo), hi);
+    if (getenv("TOTK_DEBUG_LOG")) fprintf(stderr, "[botw] list scroll %d: scroller %#llx owner %#llx at %g target %g -> %g\n", steps, (unsigned long long)sc, (unsigned long long)owner, pos, target, base + fminf(fmaxf(row * 70.0f, lo), hi));
+}
+static int list_scroll_hook(ucontext_t *u) {
+    uint64_t *x = u->uc_mcontext->__ss.__x, page = atomic_load(&g_list_page); float y, old = 0, at = 0, lo = 0, hi = 0;
+    memcpy(&y, &u->uc_mcontext->__ns.__v[1], 4);
+    if (page && runtime_quest_log_live() && camdump_read(x[19] + 0x384, &old, 4) && camdump_read(page + 0x34, &at, 4) && fabsf(old - at) < 0.5f &&
+        camdump_read(x[19] + 0x35c, &lo, 4) && camdump_read(x[19] + 0x364, &hi, 4) && hi > lo)   /* one that scrolls (others idle at 0 too) */
+        atomic_store(&g_list_scroller, x[19]);
+    *(volatile float *)(uintptr_t)(x[19] + 0x384) = y; u->uc_mcontext->__ss.__pc += 4; return 1;
+}
 int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was one of ours, handled */
     if (g_horse_ai_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ai_main + HORSE_AI_SITE) return horse_ai_hook(context);
     if (watch_trap(context)) return 1;
     if (g_nav_main) { uint64_t pc = ((ucontext_t *)context)->uc_mcontext->__ss.__pc - (uintptr_t)g_nav_main;
         if (pc == UI_UPDATE_SITE || pc == UI_LETGO_SITE || pc == UI_ENSURE_SITE) return ui_nav_hook(context); }
     if (g_horse_ret_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ret_main + HORSE_CAM_RET) return horse_ret_hook(context);
+    if (g_scroll_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_scroll_main + SCROLL_SITE) return list_scroll_hook(context);
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + INV_PAGE_SITE) return inv_page_hook(context);
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + QUEST_SITE) {
         ucontext_t *u = context; uint64_t *x = u->uc_mcontext->__ss.__x, list = 0; camdump_read(x[19] + 0x3b98, &list, 8); x[8] = list;
-        atomic_store(&g_quest_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+        atomic_store(&g_quest_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW)); atomic_store(&g_quest_list, list);
         { int tab = -1; if (list) camdump_read(list + 0x174, &tab, 4); atomic_store(&g_quest_tab, tab); }
         u->uc_mcontext->__ss.__pc += 4; return 1;
     }
@@ -2109,6 +2139,7 @@ void botw_uilist(void) {
     if (!obj) { fprintf(stderr, "[uilist] no cursor object\n"); return; }
     if (camdump_read(obj, f, sizeof f)) for (int i = 0; i < 16; i++) fprintf(stderr, "[uilist] obj+%02x %016llx\n", i * 8, (unsigned long long)f[i]);
     float at[2]; if (camdump_read(obj + 0x58, at, 8)) fprintf(stderr, "[uilist] cursor at %g %g\n", at[0], at[1]);
+    if (runtime_quest_log_live()) fprintf(stderr, "[uilist] quest list %#llx\n", (unsigned long long)atomic_load(&g_quest_list));
     { uint64_t p = title_pane();   /* the frame's corner and its parents (+0x18?) */
       for (int i = 0; i < 5 && p; i++) { char nm[25] = {0}; uint8_t fl[4] = {0}; camdump_read(p + 0xb8, nm, 24); camdump_read(p + 0x58, fl, 4);
           fprintf(stderr, "[uilist] frame pane %d %#llx %s flags %02x alpha %u\n", i, (unsigned long long)p, nm, fl[0], fl[2]);
@@ -2239,21 +2270,24 @@ static int ui_hits_of(uint64_t obj, MenuHit *out, int max, int *selected) {
                 const uint8_t *body = win + BEFORE;
                 float x, y, sz[2], m00, m11; memcpy(&x, body + 0x7c, 4); memcpy(&y, body + 0x8c, 4); memcpy(sz, body + 0x50, 8);
                 memcpy(&m00, body + 0x70, 4); memcpy(&m11, body + 0x84, 4);
-                float w = sz[0] * fabsf(m00), h = sz[1] * fabsf(m11); int empty = 0, slot = 0, based = 0;
+                float w = sz[0] * fabsf(m00), h = sz[1] * fabsf(m11); int empty = 0, slot = 0, based = 0, base = 0;
                 for (size_t o = 0; o + 0xb8 + 16 <= sizeof win; o += 8) {
                     float px, py; memcpy(&px, win + o + 0x7c, 4); memcpy(&py, win + o + 0x8c, 4);
                     if (o == BEFORE || fabsf(px - x) > 1 || fabsf(py - y) > 1) continue;
                     if (o > BEFORE && !memcmp(win + o + 0xb8, "B_Hit_", 6)) { float hs[2], a00, a11; memcpy(hs, win + o + 0x50, 8); memcpy(&a00, win + o + 0x70, 4); memcpy(&a11, win + o + 0x84, 4); w = hs[0] * fabsf(a00); h = hs[1] * fabsf(a11); }
                     if (!memcmp(win + o + 0xb8, "N_Born_00", 10)) { slot = 1; if (!(win[o + 0x58] & 0x80)) empty = 1; }
-                    if (!memcmp(win + o + 0xb8, "W_Base_01", 10) && (win[o + 0x58] & 0x80)) based = 1;
+                    if (!memcmp(win + o + 0xb8, "W_Base_01", 10)) { base = 1; if (win[o + 0x58] & 0x80) based = 1; }
                 }
-                if (slot && !based) empty = 1;   /* an inventory slot holds an item only with its base shown (an empty armor slot keeps N_Born) */
+                if (slot && base && !based) empty = 1;   /* an inventory slot holds an item only with its base shown (an empty armor slot keeps N_Born; an Adventure Log row has N_Born and no W_Base_01) */
                 if (fabsf(x - 991) < 2 && fabsf(y) < 360 && n_title < 8) { title[n_title++] = (MenuHit){ x, y, w, h, e }; goto next; }   /* the title's arrow anchors */
                 int shown = (body[0x58] & 1) && body[0x5a] >= 0x80;   /* it and every parent (+0x18): visible (flag 0x01) and mostly opaque (not fading out) */
-                uint64_t up = 0; camdump_read(pane + 0x18, &up, 8);
+                uint64_t up = 0, page = 0; camdump_read(pane + 0x18, &up, 8);
                 for (int k = 0; shown && up && k < 24; k++) {
                     uint8_t f[3] = {0}; char nm[8] = {0}; if (!camdump_read(up + 0x58, f, 3)) break; shown = (f[0] & 1) && f[2] >= 0x80;
-                    if (shown && camdump_read(up + 0xb8, nm, 6) && !memcmp(nm, "N_Cut", 5)) {   /* a list's clip area: rows scrolled out of it are not on screen */
+                    { char pg[11] = {0}; if (shown && camdump_read(up + 0xb8, pg, 11) && !memcmp(pg, "Pa_Page_00", 11)) page = up; }
+                    if (shown) camdump_read(up + 0xb8, nm, 6);
+                    if (shown && !memcmp(nm, "N_Cut", 5)) {
+                        if (page) atomic_store(&g_list_page, page);   /* a list's rows: their page (the wheel's scroll) */   /* a list's clip area: rows scrolled out of it are not on screen */
                         float c[2], cs[2], c00, c11; camdump_read(up + 0x7c, c, 4); camdump_read(up + 0x8c, c + 1, 4); camdump_read(up + 0x50, cs, 8); camdump_read(up + 0x70, &c00, 4); camdump_read(up + 0x84, &c11, 4);
                         float hw = cs[0] * fabsf(c00) / 2, hh = cs[1] * fabsf(c11) / 2, x0 = fmaxf(x - w / 2, c[0] - hw), x1 = fminf(x + w / 2, c[0] + hw), y0 = fmaxf(y - h / 2, c[1] - hh), y1 = fminf(y + h / 2, c[1] + hh);
                         if (x1 - x0 < w / 2 || y1 - y0 < h / 2) shown = 0;   /* mostly outside: left out */

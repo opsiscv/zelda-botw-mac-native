@@ -259,8 +259,10 @@ void runtime_menu_wheel(int n){dispatch_async(dispatch_get_main_queue(),^{menu_s
 static MenuHit uiHits[MENU_SLOTS_MAX];static int uiN,uiInventory;   /* this tick's boxes (title_tick) */
 static int menu_target(void){double lx,ly;pointer_layout(&lx,&ly);return menu_hit_at(uiHits,uiN,lx,ly);}
 static int walkDir;static uint64_t walkId,walkUntil;   /* a grid's page turn by its edge (menu_scroll, title_tick) */
-static void menu_scroll(int steps){   /* the wheel moves no selection (user 2026-10-29): a grid's pages only */
- extern void runtime_inventory_page(int);if(!uiMenu||!uiInventory)return;
+static void menu_scroll(int steps){   /* the wheel moves no selection (user 2026-10-29): a grid's pages only, the Adventure Log's list scrolled */
+ extern void runtime_inventory_page(int);extern void runtime_list_scroll(int);
+ if(uiMenu&&runtime_quest_log_live&&runtime_quest_log_live()){runtime_list_scroll(steps);return;}
+ if(!uiMenu||!uiInventory)return;
  if(runtime_inventory_live&&runtime_inventory_live()){runtime_inventory_page(steps);return;}   /* the pause menu: the game's own page turn */
  /* another grid (a shop's): its edge item that way selected, then one d-pad step past it turns the page */
  double lx,ly;pointer_layout(&lx,&ly);int best=-1;
