@@ -297,7 +297,9 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
   extern int runtime_ui_elements(MenuHit *,int,int *) __attribute__((weak));MenuHit h[16];int sel,k=0;   /* off the screen's units */
   int n=runtime_ui_elements?runtime_ui_elements(h,16,&sel):0;for(int i=0;i<n;i++)k+=fabsf(h[i].x-991)<2;if(k>=5)cur=0;}   /* at x 991 (menu_pointer.h) */
  int frame=cur<0&&on&&!runtime_input_dpad_held()&&runtime_menu_frame&&runtime_menu_frame(fr);
- if(cur>=0&&on&&!world){MenuHit h[4];int sel;if(runtime_ui_hits&&runtime_ui_hits(h,4,&sel)>0){cur=-1;frame=1;}}   /* items on screen over the title (the save list): that menu */
+ if(cur>=0&&on&&!world){MenuHit h[4];int sel;if(runtime_ui_hits&&runtime_ui_hits(h,4,&sel)>0){cur=-1;frame=1;}}
+ if(frame&&world){MenuHit h[4];int sel;if(!(runtime_ui_hits&&runtime_ui_hits(h,4,&sel)>0))frame=0;}   /* in the world a frame left drawn with no items on screen
+   (the menu just closed, nothing selected) is no menu: the mouse goes back to the camera (2026-10-29: the pointer stayed on the world) */   /* items on screen over the title (the save list): that menu */
  {static float lastFr[4];static int lastCur=-1;   /* nothing selected (the pointer on nothing, or a request refused): no frame, no title */
   if(frame){memcpy(lastFr,fr,sizeof lastFr);lastCur=-1;}   /* arrow, but still the same menu: told by its items on screen */
   else if(cur>=0)lastCur=cur;
