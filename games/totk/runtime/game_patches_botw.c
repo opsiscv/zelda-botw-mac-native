@@ -2219,8 +2219,10 @@ static int ui_hits_of(uint64_t obj, MenuHit *out, int max, int *selected) {
     float at[2]; int have_at = camdump_read(obj + 0x58, at, sizeof at);   /* where the frame is: the selected element's place */
     (void)end;
     int n = 0, best = 0, n_title_seen = 0; MenuHit title_seen[8];
-    for (int pass = 0; pass < 2 && !n && !(pass && sel); pass++)   /* none selected and no group known (the menu made again
-       when it opens): the group with the most items on screen */
+    for (int pass = -1; pass < 2 && !n && !(pass > 0 && sel); pass++)   /* first the last group in use with items on screen:
+       a popup or a dialog is made after the screen under it (2026-10-30: an item's Equip/Drop/Cancel, group 57 over the
+       page's 46; the selection stays behind it); then the selected one's; none selected and no group known (the menu
+       made again when it opens): the most items on screen */
     for (int g = 0; g < count && n < max; g++) {   /* every group: a long list's group can be flagged left out while it scrolls */
         uint64_t grp = 0, node = 0; int32_t off = 0;
         if (pass && fl[g] < 0) continue;   /* the fallback: only groups in use (a closed dialog's buttons are left out) */
@@ -2267,6 +2269,7 @@ static int ui_hits_of(uint64_t obj, MenuHit *out, int max, int *selected) {
             if (!camdump_read(node + 8, &node, 8)) break;
         }
         if (n_title >= 6 && n_title > n_title_seen) { n_title_seen = n_title; memcpy(title_seen, title, sizeof title); }
+        if (pass < 0) { if (n > start) { memmove(out, out + start, (size_t)(n - start) * sizeof *out); n -= start; g_last_group = grp; } continue; }
         if (pass) {   /* the biggest group so far kept, at the front */
             if (n - start > best) { best = n - start; memmove(out, out + start, (size_t)best * sizeof *out); g_last_group = grp; }
             n = best;
