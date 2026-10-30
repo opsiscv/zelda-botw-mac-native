@@ -314,11 +314,13 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
   if(world)lastCur=-1;}
  int pm=menu_pointer_mode(on,cur,frame,world),mode=pm>=MENU_POINTER_TITLE;
  {static int lastPm=-1;if(pm!=lastPm&&getenv("TOTK_DEBUG_LOG"))fprintf(stderr,"[totk] menu pointer kind %d -> %d (title item %d, frame %d, world %d)\n",lastPm,pm,cur,frame,world);lastPm=pm;}
- if(pm==MENU_POINTER_FREE&&titleMode&&!titleFree&&titleFrame&&runtime_game_world_live)set_cursor_hidden(YES);   /* a menu closing into its fade (the world not yet back): hidden at once */
+ if(pm==MENU_POINTER_FREE&&titleMode&&!titleFree&&titleFrame&&pause_menu_open())set_cursor_hidden(YES);   /* the pause menu closing into its fade (the
+   world not yet back): hidden at once; not any menu's moment without items (it hid the pointer on the save list, 2026-10-29) */
+ if((pm==MENU_POINTER_TITLE||pm==MENU_POINTER_FRAME)&&!mouseHeld)set_cursor_hidden(NO);   /* a menu: the pointer always shown */
  titleFrame=frame;titleFree=pm==MENU_POINTER_FREE;
  {static uint64_t offAt;uint64_t t=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);   /* the world going on a moment (a menu's camera, a page */
   if(mode)offAt=0;                                                               /* turning): the pointer mode holds through it, so the */
-  else if(titleMode){if(!offAt){offAt=t;if(titleFrame)set_cursor_hidden(YES);}if(t-offAt<500000000ull)return;}}   /* pointer is not taken and given back every time;
+  else if(titleMode){if(!offAt){offAt=t;if(titleFrame&&pause_menu_open())set_cursor_hidden(YES);}if(t-offAt<500000000ull)return;}}   /* pointer is not taken and given back every time;
      a menu closing hides it at once (user 2026-10-29: it stayed a second); a move shows it again */
  if(mode!=titleMode){titleMode=mode;titleTarget=-1;titleConfirm=0;front_mouse_update();
   if(mode){mouseLast=1;titleFollow=2;}   /* a menu opening: the pointer has the say at once (nothing selected unless it is on an item) */
