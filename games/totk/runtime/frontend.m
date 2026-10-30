@@ -121,6 +121,9 @@ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,cons
 @property BOOL cursorIsHidden;
 -(void)setCursorAutoHideEnabled:(BOOL)enabled;
 @end
+/* The pointer hidden or shown, from one place (NSCursor hide / unhide must pair: extra ones left it shown on the world, 2026-10-29). */
+static BOOL cursorHiddenNow;
+static void set_cursor_hidden(BOOL h){if(h==cursorHiddenNow)return;cursorHiddenNow=h;if(h)[NSCursor hide];else [NSCursor unhide];}
 @implementation TOTKInputView
 -(BOOL)acceptsFirstResponder{return YES;}
 /* While the settings panel is open only key 1 (it closes the panel, runtime/input.c) and Esc (closes it here, not the game's
@@ -216,10 +219,10 @@ static unsigned titleKey;static NSCursor *titleCursor;   /* titleFrame: a menu w
 -(void)resetCursorRects{if(titleMode&&titleCursor)[self addCursorRect:self.bounds cursor:titleCursor];else [super resetCursorRects];}   /* the title menu's pointer, kept by AppKit */
 -(void)hideCursorIfIdle:(NSTimer *)timer{
  (void)timer;self.cursorHideTimer=nil;
- if(titleFree&&self.window.isKeyWindow){if(!self.cursorIsHidden){[NSCursor hide];self.cursorIsHidden=YES;}return;}   /* a cutscene: the free pointer out of the picture while idle */
+ if(titleFree&&self.window.isKeyWindow){set_cursor_hidden(YES);return;}   /* a cutscene: the free pointer out of the picture while idle */
  if(titleMode)return;
  if(!self.cursorAutoHideActive||!self.window.isKeyWindow||!(self.window.styleMask&NSWindowStyleMaskFullScreen))return;
- if(!self.cursorIsHidden){[NSCursor hide];self.cursorIsHidden=YES;}
+ set_cursor_hidden(YES);
 }
 /* The title menu with the mouse (menu_pointer.h): mouse mode lets the pointer go there, the item under it is walked to
    with the d-pad (title_tick) and a click confirms it (A). */
@@ -233,12 +236,12 @@ static int title_item_at(NSView *v,NSEvent *e){NSPoint p=[v convertPoint:e.locat
 -(void)mouseMoved:(NSEvent *)e{
  if(mouseHeld){runtime_mouse_move(e.deltaX,e.deltaY);return;}
  if(titleMode){titleFollow=2;
-  [self.cursorHideTimer invalidate];self.cursorHideTimer=nil;if(self.cursorIsHidden){[NSCursor unhide];self.cursorIsHidden=NO;}
+  [self.cursorHideTimer invalidate];self.cursorHideTimer=nil;if(!mouseHeld)set_cursor_hidden(NO);
   if(titleFree)self.cursorHideTimer=[NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(hideCursorIfIdle:) userInfo:nil repeats:NO];
   int i=titleFree?-1:title_item_at(self,e);titleTarget=i;if(titleCursor)[titleCursor set];return;}
  if(!self.cursorAutoHideActive)return;
  [self.cursorHideTimer invalidate];self.cursorHideTimer=nil;
- if(self.cursorIsHidden){[NSCursor unhide];self.cursorIsHidden=NO;}
+ if(!mouseHeld)set_cursor_hidden(NO);
  self.cursorHideTimer=[NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(hideCursorIfIdle:) userInfo:nil repeats:NO];
 }
 -(void)scrollWheel:(NSEvent *)e{   /* by notches (menu_wheel): a notch of the wheel is one step */
@@ -262,7 +265,7 @@ static int title_item_at(NSView *v,NSEvent *e){NSPoint p=[v convertPoint:e.locat
   self.window.acceptsMouseMovedEvents=YES;
   self.cursorHideTimer=[NSTimer scheduledTimerWithTimeInterval:1.5 target:self selector:@selector(hideCursorIfIdle:) userInfo:nil repeats:NO];
  }else{
-  if(self.cursorIsHidden){[NSCursor unhide];self.cursorIsHidden=NO;}
+  if(!mouseHeld)set_cursor_hidden(NO);
   self.window.acceptsMouseMovedEvents=mouseHeld;
  }
 }
@@ -286,6 +289,7 @@ static int title_select(int item){
  if(item<0||item>=n)return 0;runtime_ui_select(h[item].id);return 1;}
 static uint64_t freeTick;   /* title_tick: the last tick with no menu (FREE) */
 static void title_tick(void){   /* main thread, every 8 ms */
+ if(!mouseHeld&&!titleMode)front_mouse_update();   /* the world waiting for the pointer to come onto the game */
  {static NSPoint seen;NSPoint m=NSEvent.mouseLocation;if(m.x!=seen.x||m.y!=seen.y||(fakePointerOn&&titleFollow==2)){seen=m;keysLead=0;}
   extern void runtime_ui_pointer_rules(int) __attribute__((weak));if(runtime_ui_pointer_rules)runtime_ui_pointer_rules(!keysLead);}   /* the mouse has the say unless a key took it */
  if(titleKey){runtime_input_key_synthetic(titleKey,0);titleKey=0;return;}   /* the press stays pending until the game reads it */
@@ -374,14 +378,14 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
 }
 static void front_mouse_update(void){   /* main thread; also runtime/gamepad.m's hook when mouse mode changes */
  BOOL want=window&&runtime_mouse_enabled()&&window.isKeyWindow&&!textEntryOpen&&!settingsOpen&&!titleMode;
+ if(want&&!mouseHeld){NSPoint m=NSEvent.mouseLocation;NSRect f=[window convertRectToScreen:window.contentView.frame];
+  if(!NSPointInRect(m,f))want=NO;}   /* the pointer elsewhere (another screen): held only once it is on the game (title_tick looks again) */
  if(want==mouseHeld)return;
  mouseHeld=want;
  if(want){
-  NSRect f=[window convertRectToScreen:window.contentView.frame];CGFloat top=NSMaxY(NSScreen.screens.firstObject.frame);
-  CGWarpMouseCursorPosition(CGPointMake(NSMidX(f),top-NSMidY(f)));   /* clicks land in the window */
-  CGAssociateMouseAndMouseCursorPosition(false);[NSCursor hide];window.acceptsMouseMovedEvents=YES;
+  CGAssociateMouseAndMouseCursorPosition(false);set_cursor_hidden(YES);window.acceptsMouseMovedEvents=YES;   /* the pointer stays where it is, hidden */
  }else{
-  CGAssociateMouseAndMouseCursorPosition(true);[NSCursor unhide];   /* the pointer stays where it is (no put back: it jumped, 2026-10-29) */runtime_mouse_release();
+  CGAssociateMouseAndMouseCursorPosition(true);set_cursor_hidden(NO);runtime_mouse_release();   /* and shows there again: never moved (user 2026-10-29) */
   window.acceptsMouseMovedEvents=((TOTKInputView *)window.contentView).cursorAutoHideActive;
  }
  fprintf(stderr,"[totk] mouse %s\n",want?"held by the window (the settings panel, key 1, or Command-Tab lets it go)":"let go");
@@ -532,7 +536,7 @@ void runtime_front_resize_aspect(double ratio){
    save waits (up to 15 s, the window already gone) until the game has written and committed it (runtime_fs_save_busy). */
 -(void)windowWillClose:(NSNotification *)n{(void)n;
  [(TOTKInputView *)window.contentView setCursorAutoHideEnabled:NO];
- if(mouseHeld){mouseHeld=NO;CGAssociateMouseAndMouseCursorPosition(true);[NSCursor unhide];}
+ if(mouseHeld){mouseHeld=NO;CGAssociateMouseAndMouseCursorPosition(true);set_cursor_hidden(NO);}
  if(!runtime_fs_save_busy()){fprintf(stderr,"[totk] window closed; graceful guest shutdown pending\n");_exit(0);}
  fprintf(stderr,"[totk] window closed while the game is saving: quitting when the save is done\n");
  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
