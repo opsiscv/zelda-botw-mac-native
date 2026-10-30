@@ -123,7 +123,8 @@ static CVReturn vsync_callback(CVDisplayLinkRef link,const CVTimeStamp *now,cons
 @end
 /* The pointer hidden or shown, from one place (NSCursor hide / unhide must pair: extra ones left it shown on the world, 2026-10-29). */
 static BOOL cursorHiddenNow;
-static void set_cursor_hidden(BOOL h){if(h==cursorHiddenNow)return;cursorHiddenNow=h;if(h)[NSCursor hide];else [NSCursor unhide];}
+static void set_cursor_hidden(BOOL h){if(h==cursorHiddenNow)return;cursorHiddenNow=h;if(h)[NSCursor hide];else [NSCursor unhide];
+ if(getenv("TOTK_DEBUG_LOG"))fprintf(stderr,"[totk] pointer %s\n",h?"hidden":"shown");}
 @implementation TOTKInputView
 -(BOOL)acceptsFirstResponder{return YES;}
 /* While the settings panel is open only key 1 (it closes the panel, runtime/input.c) and Esc (closes it here, not the game's
