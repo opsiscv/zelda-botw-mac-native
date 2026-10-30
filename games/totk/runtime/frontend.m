@@ -221,7 +221,8 @@ static void menu_scroll(int steps);
 -(void)scrollWheel:(NSEvent *)e{   /* by notches (menu_wheel): a notch of the wheel is one step */
  static MenuWheel wheel;if(e.momentumPhase!=NSEventPhaseNone)return;
  int steps=menu_wheel(&wheel,e.timestamp,e.deltaY);if(!steps)return;
- if(mouseHeld){extern void runtime_mouse_wheel(int);runtime_mouse_wheel(steps);}else menu_scroll(steps);}
+ extern int runtime_input_dpad_held(void);   /* a quick-select bar (weapons, runes, shields, bows, arrows): the wheel walks it */
+ if(mouseHeld||runtime_input_dpad_held()){extern void runtime_mouse_wheel(int);runtime_mouse_wheel(steps);}else menu_scroll(steps);}
 -(void)mouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
 -(void)rightMouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
 -(void)otherMouseDragged:(NSEvent *)e{if(mouseHeld)runtime_mouse_move(e.deltaX,e.deltaY);}
@@ -267,7 +268,7 @@ static void title_tick(void){   /* main thread, every 8 ms: the three answers, n
  uint64_t selId=hsel>=0?uiHits[hsel].id:0;
  int inv=0;for(int i=0;i<uiN;i++)inv+=fabsf(uiHits[i].w-90)<6&&fabsf(uiHits[i].h-90)<6;uiInventory=inv>=2;   /* its 90 x 90 slots */
  if(uiInventory){int k=0;for(int i=0;i<uiN;i++)if(uiHits[i].x>=MENU_GRID_PAGE_LEFT_X-10&&uiHits[i].x<=MENU_GRID_PAGE_RIGHT_X+10)uiHits[k++]=uiHits[i];uiN=k;}   /* its page only */
- int menu=uiN>0;
+ extern int runtime_input_dpad_held(void);int menu=uiN>0&&!runtime_input_dpad_held();   /* the quick-select bar is no menu (the camera's) */
  if(menu!=uiMenu){uiMenu=menu;fprintf(stderr,"[totk] menu pointer: %s\n",menu?"a menu":"no menu");
   [window invalidateCursorRectsForView:window.contentView];if(menu){[menu_cursor() set];window.acceptsMouseMovedEvents=YES;}}
  front_mouse_update();
