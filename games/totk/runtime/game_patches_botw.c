@@ -32,6 +32,8 @@ enum { INV_PAGE_SITE = 0x11b66f8, INV_PAGE_WORD = 0xb9761c08, INV_PAGE_TURN = 0x
 static uint8_t *g_inv_main; static _Atomic int g_inv_pages;
 enum { QUEST_SITE = 0x11b9b3c, QUEST_WORD = 0xf95dce68 };
 enum { SCROLL_SITE = 0x10886fc, SCROLL_WORD = 0xbd038661 };
+enum { SLIDE_SITE = 0x10860c4, SLIDE_WORD = 0x2d458e60 };
+static uint8_t *g_slide_main;
 static uint8_t *g_scroll_main;   /* a list's scroll step (main+0x10885e0): str s1, [x19, #0x384], its position */   /* the pause menu's Adventure Log step (runs while it is open), at ldr x8, [x19, #0x3b98] */
 static _Atomic uint64_t g_quest_ns;
 static _Atomic int g_quest_tab;
@@ -660,6 +662,9 @@ void runtime_game_patches(Module *m) {
     { uint32_t w; memcpy(&w, m->base + SCROLL_SITE, 4);
       if (w == SCROLL_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d3u << 5); memcpy(m->base + SCROLL_SITE, &b, 4); g_scroll_main = m->base; }
       fprintf(stderr, "[botw] list scroll: %s\n", g_scroll_main ? "hooked" : "not hooked"); }
+    { uint32_t w; memcpy(&w, m->base + SLIDE_SITE, 4);
+      if (w == SLIDE_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d3u << 5); memcpy(m->base + SLIDE_SITE, &b, 4); g_slide_main = m->base; }
+      fprintf(stderr, "[botw] slide list: %s\n", g_slide_main ? "hooked" : "not hooked"); }
     { uint32_t w; memcpy(&w, m->base + INV_PAGE_SITE, 4);
       if (w == INV_PAGE_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d4u << 5); memcpy(m->base + INV_PAGE_SITE, &b, 4); g_inv_main = m->base; }
       fprintf(stderr, "[botw] inventory pages: %s\n", g_inv_main ? "hooked" : "not hooked"); }
@@ -1007,6 +1012,28 @@ static int list_scroll_hook(ucontext_t *u) {
         atomic_store(&g_list_scroller, x[19]);
     *(volatile float *)(uintptr_t)(x[19] + 0x384) = y; u->uc_mcontext->__ss.__pc += 4; return 1;
 }
+/* The other lists (the saves, Options): a slide list's step (main+0x1086050, x19, every frame it is shown) moves its
+   position (+0x2c) to a target (+0x30), rows +0x38 apart, over a length (+0x28) of which its area (+0x3c..+0x48, x0 y0
+   x1 y1) shows a part; +0x34 >= 2 is a sideways one. The wheel moves the target a row a notch, as on the Adventure Log. */
+static _Atomic uint64_t g_slide, g_slide_ns;
+static int slide_room(uint64_t l, float *len, float *row) {   /* a vertical slide list with room to scroll: its rows apart */
+    float f[9]; int mode; return camdump_read(l + 0x28, f, sizeof f) && camdump_read(l + 0x34, &mode, 4) && mode < 2 && f[4] > 0 &&
+        (*len = f[0] - (f[8] - f[6])) > 1 && (*row = f[4], 1);
+}
+int runtime_slide_scroll(int steps) {   /* frontend.m: the wheel's notches; 0 if no list is scrolling here */
+    uint64_t l = atomic_load(&g_slide), t = atomic_load(&g_slide_ns); float len, row, target;
+    if (!l || clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t > 150000000ull || !slide_room(l, &len, &row) || !camdump_read(l + 0x30, &target, 4)) return 0;
+    *(volatile float *)(uintptr_t)(l + 0x30) = fminf(fmaxf((roundf(target / row) + (float)steps) * row, 0), len);
+    return 1;
+}
+static int slide_hook(ucontext_t *u) {
+    uint64_t *x = u->uc_mcontext->__ss.__x; uint32_t a = 0, b = 0; float len, row;
+    camdump_read(x[19] + 0x2c, &a, 4); camdump_read(x[19] + 0x30, &b, 4);
+    if (slide_room(x[19], &len, &row)) { atomic_store(&g_slide, x[19]); atomic_store(&g_slide_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW)); }
+    memset(&u->uc_mcontext->__ns.__v[0], 0, 16); memset(&u->uc_mcontext->__ns.__v[3], 0, 16);
+    memcpy(&u->uc_mcontext->__ns.__v[0], &a, 4); memcpy(&u->uc_mcontext->__ns.__v[3], &b, 4);   /* ldp s0, s3, [x19, #0x2c] */
+    u->uc_mcontext->__ss.__pc += 4; return 1;
+}
 int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was one of ours, handled */
     if (g_horse_ai_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ai_main + HORSE_AI_SITE) return horse_ai_hook(context);
     if (watch_trap(context)) return 1;
@@ -1014,6 +1041,7 @@ int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was
         if (pc == UI_UPDATE_SITE || pc == UI_LETGO_SITE || pc == UI_ENSURE_SITE) return ui_nav_hook(context); }
     if (g_horse_ret_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ret_main + HORSE_CAM_RET) return horse_ret_hook(context);
     if (g_scroll_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_scroll_main + SCROLL_SITE) return list_scroll_hook(context);
+    if (g_slide_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_slide_main + SLIDE_SITE) return slide_hook(context);
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + INV_PAGE_SITE) return inv_page_hook(context);
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + QUEST_SITE) {
         ucontext_t *u = context; uint64_t *x = u->uc_mcontext->__ss.__x, list = 0; camdump_read(x[19] + 0x3b98, &list, 8); x[8] = list;

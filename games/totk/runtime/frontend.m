@@ -264,6 +264,7 @@ static int walkDir;static uint64_t walkId,walkUntil;   /* a grid's page turn by 
 static void menu_scroll(int steps){   /* the wheel moves no selection (user 2026-10-29): a grid's pages only, the Adventure Log's list scrolled */
  extern void runtime_inventory_page(int);extern void runtime_list_scroll(int);
  if(uiMenu&&runtime_quest_log_live&&runtime_quest_log_live()){runtime_list_scroll(steps);return;}
+ extern int runtime_slide_scroll(int);if(uiMenu&&runtime_slide_scroll(steps))return;   /* the saves, Options */
  if(!uiMenu||!uiInventory)return;
  if(runtime_inventory_live&&runtime_inventory_live()){runtime_inventory_page(steps);return;}   /* the pause menu: the game's own page turn */
  /* another grid (a shop's): its edge item that way selected, then one d-pad step past it turns the page */
