@@ -2192,6 +2192,7 @@ static int ui_hits(MenuHit *out, int max, int *selected, int all) {
        when it opens): the group with the most items on screen */
     for (int g = 0; g < count && n < max; g++) {   /* every group: a long list's group can be flagged left out while it scrolls */
         uint64_t grp = 0, node = 0; int32_t off = 0;
+        if (pass && fl[g] < 0) continue;   /* the fallback: only groups in use (a closed dialog's buttons are left out) */
         if (!camdump_read(groups + 8 * (uint64_t)g, &grp, 8) || !camdump_read(grp + 0x90, &node, 8) || !camdump_read(grp + 0x9c, &off, 4)) continue;
         int start = n, mine = 0;
         for (int k = 0; k < 300 && n < max && node && node != grp + 0x88; k++) {
@@ -2224,6 +2225,7 @@ static int ui_hits(MenuHit *out, int max, int *selected, int all) {
                     }
                     if (!camdump_read(up + 0x18, &up, 8)) break;
                 }
+                if (!all && (fabsf(x) > 640 || fabsf(y) > 360)) shown = 0;   /* off the screen (the title's arrow anchors: in their own units) */
                 if (shown && !empty) out[n++] = (MenuHit){ x, y, w, h, e };
             }
             if (sel && n > before && have_at && fabsf(out[n - 1].x - at[0]) < 3 && fabsf(out[n - 1].y - at[1]) < 3) mine = 1;   /* the frame is on it (none selected: its place is stale) */
