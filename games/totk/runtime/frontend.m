@@ -338,7 +338,8 @@ extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) s
   
   
   static MenuHit hits[MENU_SLOTS_MAX];static int hwait;static uint64_t huntil,hasked,hfirst;
-  int hsel=-1,hn=runtime_ui_hits?runtime_ui_hits(hits,MENU_SLOTS_MAX,&hsel):0,inv=menu_frame_small(fr);
+  int hsel=-1,hn=runtime_ui_hits?runtime_ui_hits(hits,MENU_SLOTS_MAX,&hsel):0,inv=0;
+  for(int i=0;i<hn;i++)inv+=fabsf(hits[i].w-90)<6&&fabsf(hits[i].h-90)<6;inv=inv>=2;   /* the inventory: its 90 x 90 slots (the frame is gone with nothing selected) */
   if(inv){int k=0,ks=-1;for(int i=0;i<hn;i++){if(hits[i].x<MENU_GRID_PAGE_LEFT_X-10||hits[i].x>MENU_GRID_PAGE_RIGHT_X+10)continue;   /* the inventory: its page only */
     if(i==hsel)ks=k;hits[k++]=hits[i];}hsel=ks;hn=k;}
   if(runtime_ui_unfocused&&runtime_ui_unfocused())hsel=-1;   /* nothing selected: the frame's place is the last one's */

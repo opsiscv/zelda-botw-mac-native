@@ -2133,6 +2133,10 @@ void botw_uilist(void) {
       for (int i = 0; i < n; i++) {
           uint64_t ctl = 0; camdump_read(h[i].id + 0x18, &ctl, 8);
           fprintf(stderr, "[uilist] hit %d %g %g %gx%g element %#llx control %#llx%s\n", i, h[i].x, h[i].y, h[i].w, h[i].h, (unsigned long long)h[i].id, (unsigned long long)ctl, i == sel ? " (selected)" : "");
+          { uint64_t pane = 0; static uint8_t w[0xc00]; if (getenv("TOTK_UILIST_PANES") && camdump_read(ctl + 0x60, &pane, 8) && camdump_read(pane - 0x400, w, sizeof w))
+              for (size_t o = 0; o + 0xc8 <= sizeof w; o += 8) { const char *nm = (const char *)w + o + 0xb8; float px, py; memcpy(&px, w + o + 0x7c, 4); memcpy(&py, w + o + 0x8c, 4);
+                  if (nm[0] >= 'A' && nm[0] <= 'Z' && (nm[1] == '_' || nm[2] == '_') && memchr(nm, 0, 16) && fabsf(px - h[i].x) < 2 && fabsf(py - h[i].y) < 2)
+                      fprintf(stderr, "[uilist]    %+5ld %-14s flags %02x alpha %u\n", (long)o - 0x400, nm, w[o + 0x58], w[o + 0x5a]); } }
       } }
     if (!camdump_read(obj + 0x48, &sel, 8) || !sel) return;
     int n = 0;
@@ -2206,13 +2210,15 @@ static int ui_hits(MenuHit *out, int max, int *selected, int all) {
                 const uint8_t *body = win + BEFORE;
                 float x, y, sz[2], m00, m11; memcpy(&x, body + 0x7c, 4); memcpy(&y, body + 0x8c, 4); memcpy(sz, body + 0x50, 8);
                 memcpy(&m00, body + 0x70, 4); memcpy(&m11, body + 0x84, 4);
-                float w = sz[0] * fabsf(m00), h = sz[1] * fabsf(m11); int empty = 0;
+                float w = sz[0] * fabsf(m00), h = sz[1] * fabsf(m11); int empty = 0, slot = 0, based = 0;
                 for (size_t o = 0; o + 0xb8 + 16 <= sizeof win; o += 8) {
                     float px, py; memcpy(&px, win + o + 0x7c, 4); memcpy(&py, win + o + 0x8c, 4);
                     if (o == BEFORE || fabsf(px - x) > 1 || fabsf(py - y) > 1) continue;
                     if (o > BEFORE && !memcmp(win + o + 0xb8, "B_Hit_", 6)) { float hs[2], a00, a11; memcpy(hs, win + o + 0x50, 8); memcpy(&a00, win + o + 0x70, 4); memcpy(&a11, win + o + 0x84, 4); w = hs[0] * fabsf(a00); h = hs[1] * fabsf(a11); }
-                    if (!memcmp(win + o + 0xb8, "N_Born_00", 10) && !(win[o + 0x58] & 0x80)) empty = 1;
+                    if (!memcmp(win + o + 0xb8, "N_Born_00", 10)) { slot = 1; if (!(win[o + 0x58] & 0x80)) empty = 1; }
+                    if (!memcmp(win + o + 0xb8, "W_Base_01", 10) && (win[o + 0x58] & 0x80)) based = 1;
                 }
+                if (slot && !based) empty = 1;   /* an inventory slot holds an item only with its base shown (an empty armor slot keeps N_Born) */
                 int shown = all || ((body[0x58] & 1) && body[0x5a]);   /* it and every parent (+0x18): visible (flag 0x01) and not see-through */
                 uint64_t up = 0; camdump_read(pane + 0x18, &up, 8);
                 for (int k = 0; shown && !all && up && k < 24; k++) {
