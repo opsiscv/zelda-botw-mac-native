@@ -2300,10 +2300,8 @@ static int ui_nav_hook(ucontext_t *u) {
         }
     }
     if (pc == UI_ENSURE_SITE) {   /* the other per-frame step that picks one when none is selected (main+0x134f100) */
-        if (x[19] == atomic_load(&g_unfocus_obj)) {   /* none: it stays none (one left from the menu's last opening: forgotten) */
-            if (sel) *(volatile uint64_t *)(uintptr_t)(x[19] + 0x48) = 0;
-            u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + 0x134f194;
-        }
+        if (x[19] == atomic_load(&g_unfocus_obj) && !sel) u->uc_mcontext->__ss.__pc = (uintptr_t)g_nav_main + 0x134f194;   /* none: it stays none
+            (one still selected is let go by the update, the game's way, so its highlight goes too: 2026-10-29 two shown at once) */
         else { x[0] = sel; u->uc_mcontext->__ss.__pc += 4; }
         return 1;
     }
