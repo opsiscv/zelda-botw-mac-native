@@ -136,7 +136,8 @@ extern int runtime_game_world_live(void) __attribute__((weak));
 extern int runtime_inventory_slots(MenuSlot *,int,int *) __attribute__((weak));
 extern int runtime_quest_log_live(void) __attribute__((weak));
 /* The pause menu's inventory or Adventure Log is open (the System tab has no sign here: from it Q goes back). */
-static int pause_tabs_open(void){if(runtime_game_world_live&&runtime_game_world_live())return 0;if(runtime_quest_log_live&&runtime_quest_log_live())return 1;MenuSlot slots[MENU_SLOTS_MAX];int sel;return runtime_inventory_slots&&runtime_inventory_slots(slots,MENU_SLOTS_MAX,&sel)>0;}
+extern int runtime_inventory_live(void) __attribute__((weak));   /* game_patches_botw.c: the pause menu's inventory step runs */
+static int pause_tabs_open(void){return (runtime_quest_log_live&&runtime_quest_log_live())||(runtime_inventory_live&&runtime_inventory_live());}
 static unsigned escAs,enterAs,eAs,spaceAs,vAs;
 /* The one state of the mouse in menus (title_tick decides it every 8 ms; user 2026-10-29: as simple as that):
    uiMenu   a menu's items are on screen (runtime_ui_hits): the pointer is shown and is the selection;
@@ -150,7 +151,11 @@ enum{KEY_NONE=255,KEY_SKIP=254};   /* runtime_input_key ignores them; KEY_SKIP: 
 static int world_on(void){return !runtime_game_world_live||runtime_game_world_live();}
 static unsigned space_key(void){int r=space_role(world_on(),0,uiMenu);return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
 /* A window key after the settings panel: what it presses depends on where the game is (above). */
+static unsigned horseE,horseShift;   /* on horseback (user 2026-10-29): Shift spurs (A), E gets off (B); kept per press */
+static int riding(void){extern int runtime_horse_state(float *,float *) __attribute__((weak));float y,v;return runtime_horse_state&&runtime_horse_state(&y,&v);}
 static void front_key_down(unsigned short code,int repeat){
+ if(code==14&&(repeat?horseE:riding())){if(!repeat)horseE=56;runtime_input_key(56,1);return;}
+ if(code==56&&(repeat?horseShift:riding())){if(!repeat)horseShift=38;runtime_input_key(38,1);return;}
  if(code!=53&&code!=48&&code!=12&&code!=14&&code!=36&&code!=49&&!(code>=18&&code<=29))keysLead=1;   /* a key that walks the menu (not Esc, Tab, Q, E, Enter, Space, digits) */
  if(code==56&&in_menu())return;   /* Shift in a menu: nothing (only Esc goes back) */
  if(code==53){if(!repeat)escAs=esc_is_plus(world_on(),0,uiMenu)?53:56;runtime_input_key(escAs,1);return;}   /* a menu: back; else + */
@@ -159,7 +164,7 @@ static void front_key_down(unsigned short code,int repeat){
  if(code==49){if(!repeat){spaceAs=space_key();fprintf(stderr,"[totk-input] Space: %s\n",spaceAs==KEY_SKIP?"A and X (cutscene, dialog)":spaceAs==38?"A (menu)":"X (world)");}if(spaceAs==KEY_SKIP){runtime_input_key(38,1);runtime_input_key(34,1);}else runtime_input_key(spaceAs,1);return;}   /* space_skip.h */
  if(code==36){if(!repeat)enterAs=runtime_game_world_live&&!runtime_game_world_live()?38:36;runtime_input_key(enterAs,1);return;}   /* Enter in a menu: A */
  runtime_input_key(code,1);}
-static void front_key_up(unsigned short code){if(code==53&&escAs){runtime_input_key(escAs,0);escAs=0;return;}if(code==36&&enterAs){runtime_input_key(enterAs,0);enterAs=0;return;}if(code==14&&eAs){runtime_input_key(eAs,0);eAs=0;return;}if(code==9&&vAs){runtime_input_key(vAs,0);vAs=0;return;}if(code==49&&spaceAs){if(spaceAs==KEY_SKIP){runtime_input_key(38,0);runtime_input_key(34,0);}else runtime_input_key(spaceAs,0);spaceAs=0;return;}runtime_input_key(code,0);}
+static void front_key_up(unsigned short code){if(code==14&&horseE){runtime_input_key(horseE,0);horseE=0;return;}if(code==56&&horseShift){runtime_input_key(horseShift,0);horseShift=0;return;}if(code==53&&escAs){runtime_input_key(escAs,0);escAs=0;return;}if(code==36&&enterAs){runtime_input_key(enterAs,0);enterAs=0;return;}if(code==14&&eAs){runtime_input_key(eAs,0);eAs=0;return;}if(code==9&&vAs){runtime_input_key(vAs,0);vAs=0;return;}if(code==49&&spaceAs){if(spaceAs==KEY_SKIP){runtime_input_key(38,0);runtime_input_key(34,0);}else runtime_input_key(spaceAs,0);spaceAs=0;return;}runtime_input_key(code,0);}
 /* keys.txt next to controls.txt (TOTK_CONTROLS; key_map.h): read at the first key. A bad line is logged and the
    default kept. */
 static unsigned key_remap(unsigned code){static uint8_t map[KEY_MAP_SIZE];static int loaded;
@@ -253,8 +258,17 @@ void runtime_menu_pointer(double lx,double ly){dispatch_async(dispatch_get_main_
 void runtime_menu_wheel(int n){dispatch_async(dispatch_get_main_queue(),^{menu_scroll(n);});}   /* tests: "wheel <notches>" */
 static MenuHit uiHits[MENU_SLOTS_MAX];static int uiN,uiInventory;   /* this tick's boxes (title_tick) */
 static int menu_target(void){double lx,ly;pointer_layout(&lx,&ly);return menu_hit_at(uiHits,uiN,lx,ly);}
-static void menu_scroll(int steps){   /* the wheel moves no selection (user 2026-10-29): the inventory's pages only */
- extern void runtime_inventory_page(int);if(uiMenu&&uiInventory)runtime_inventory_page(steps);}
+static int walkDir;static uint64_t walkId,walkUntil;   /* a grid's page turn by its edge (menu_scroll, title_tick) */
+static void menu_scroll(int steps){   /* the wheel moves no selection (user 2026-10-29): a grid's pages only */
+ extern void runtime_inventory_page(int);if(!uiMenu||!uiInventory)return;
+ if(runtime_inventory_live&&runtime_inventory_live()){runtime_inventory_page(steps);return;}   /* the pause menu: the game's own page turn */
+ /* another grid (a shop's): its edge item that way selected, then one d-pad step past it turns the page */
+ double lx,ly;pointer_layout(&lx,&ly);int best=-1;
+ for(int i=0;i<uiN;i++){if(best<0){best=i;continue;}
+  double dx=steps>0?uiHits[i].x-uiHits[best].x:uiHits[best].x-uiHits[i].x;
+  if(dx>2||(fabs(dx)<=2&&fabs(uiHits[i].y-ly)<fabs(uiHits[best].y-ly)))best=i;}
+ if(best<0||!runtime_ui_select)return;
+ walkDir=steps>0?1:-1;walkId=uiHits[best].id;walkUntil=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+400000000ull;runtime_ui_select(walkId);}
 static void menu_click(void){   /* the left button off the camera: A on the item under the pointer; beside the inventory's
  page its page turn; off the items nothing; where there are no items (a dialog, a cutscene) A */
  if(!uiMenu){press(38);return;}
@@ -267,13 +281,15 @@ static void title_tick(void){   /* main thread, every 8 ms: the three answers, n
  int hsel=-1;uiN=on&&runtime_ui_hits?runtime_ui_hits(uiHits,MENU_SLOTS_MAX,&hsel):0;
  uint64_t selId=hsel>=0?uiHits[hsel].id:0;
  int inv=0;for(int i=0;i<uiN;i++)inv+=fabsf(uiHits[i].w-90)<6&&fabsf(uiHits[i].h-90)<6;uiInventory=inv>=2;   /* its 90 x 90 slots */
- if(uiInventory){int k=0;for(int i=0;i<uiN;i++)if(uiHits[i].x>=MENU_GRID_PAGE_LEFT_X-10&&uiHits[i].x<=MENU_GRID_PAGE_RIGHT_X+10)uiHits[k++]=uiHits[i];uiN=k;}   /* its page only */
+ if(uiInventory&&runtime_inventory_live&&runtime_inventory_live()){int k=0;for(int i=0;i<uiN;i++)if(uiHits[i].x>=MENU_GRID_PAGE_LEFT_X-10&&uiHits[i].x<=MENU_GRID_PAGE_RIGHT_X+10)uiHits[k++]=uiHits[i];uiN=k;}   /* its page only */
  extern int runtime_input_dpad_held(void);int menu=uiN>0&&!runtime_input_dpad_held();   /* the quick-select bar is no menu (the camera's) */
  if(menu!=uiMenu){uiMenu=menu;fprintf(stderr,"[totk] menu pointer: %s\n",menu?"a menu":"no menu");
   [window invalidateCursorRectsForView:window.contentView];if(menu){[menu_cursor() set];window.acceptsMouseMovedEvents=YES;}}
  front_mouse_update();
  if(on&&window.isKeyWindow)set_cursor_hidden(mouseHeld||(!menu&&NSPointInRect(NSEvent.mouseLocation,[window convertRectToScreen:window.contentView.frame])));   /* shown only on a menu; off the game's window it is the Mac's */
  if(runtime_ui_mouse_rules)runtime_ui_mouse_rules(on&&!keysLead);
+ if(walkDir){if(selId==walkId){press(walkDir>0?11:3);walkDir=0;return;}   /* there: the step past the edge (B right, F left) */
+  if(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)>walkUntil)walkDir=0;else return;}
  if(!menu||keysLead||!runtime_ui_select)return;
  static uint64_t sent=1;int t=menu_target();uint64_t want=t>=0?uiHits[t].id:0;   /* the item under the pointer, or none */
  if(want!=sent||want!=selId){sent=want;runtime_ui_select(want);}   /* asked again until the game shows it (a page turning refuses a moment) */

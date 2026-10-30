@@ -846,8 +846,10 @@ static int probe_hook(ucontext_t *u, int i) {
    game's own page turn. The mouse (frontend.m: a wheel notch, a click on a page arrow) asks for pages here; the step
    takes one per frame and makes that call instead of reading input, then returns through its own epilogue. */
 void runtime_inventory_page(int pages) { atomic_fetch_add(&g_inv_pages, pages); }
+static _Atomic uint64_t g_inv_live_ns;   /* the pause menu's inventory step ran (its last frame) */
+int runtime_inventory_live(void) { uint64_t t = atomic_load(&g_inv_live_ns); return t && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t < 150000000ull; }
 static int inv_page_hook(ucontext_t *u) {
-    uint64_t *x = u->uc_mcontext->__ss.__x;
+    uint64_t *x = u->uc_mcontext->__ss.__x; atomic_store(&g_inv_live_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
     x[8] = *(uint32_t *)(uintptr_t)(x[0] + 0x361c);   /* ldr w8, [x0, #0x361c] */
     int n = atomic_load(&g_inv_pages), d = n > 0 ? 1 : n < 0 ? -1 : 0;
     if (!d || !atomic_compare_exchange_strong(&g_inv_pages, &n, n - d)) { u->uc_mcontext->__ss.__pc += 4; return 1; }
