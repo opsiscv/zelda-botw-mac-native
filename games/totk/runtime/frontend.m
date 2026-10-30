@@ -156,6 +156,7 @@ static void give_back(void){
   for(int i=0;best<0&&i<n;i++){double d=(h[i].x-lastSelX)*(h[i].x-lastSelX)+(h[i].y-lastSelY)*(h[i].y-lastSelY);if(d<bd){bd=d;}}
   if(best<0)for(int i=0;i<n;i++){double d=(h[i].x-lastSelX)*(h[i].x-lastSelX)+(h[i].y-lastSelY)*(h[i].y-lastSelY);if(d<=bd){best=i;break;}}}
  if(best>=0&&runtime_ui_select)runtime_ui_select(h[best].id);else if(runtime_ui_refocus)runtime_ui_refocus();}
+static int keysLead;   /* a key walked the menu since the pointer last moved (title_tick hands it to game_patches_botw.c) */
 static int mouseLast;   /* the pointer moved since the last key: the frame follows it (title_tick) */
 static int in_menu(void){return runtime_game_world_live&&!runtime_game_world_live();}
 enum{KEY_NONE=255,KEY_SKIP=254};   /* runtime_input_key ignores them; KEY_SKIP: J (A) and I (X) together */
@@ -164,6 +165,7 @@ static unsigned space_key(void){int r=space_role(!runtime_game_world_live||runti
  return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
 /* A window key after the settings panel: what it presses depends on where the game is (above). */
 static void front_key_down(unsigned short code,int repeat){
+ if(code!=53&&code!=48&&code!=12&&code!=14&&code!=36&&code!=49)keysLead=1;   /* a key that walks the menu (not Esc, Tab, Q, E, Enter, Space): the game picks again */
  if(mouseLast&&code!=53&&code!=48&&code!=12&&code!=14){mouseLast=0;if(runtime_ui_unfocused&&runtime_ui_unfocused())give_back();else if(runtime_ui_refocus)runtime_ui_refocus();}   /* the keyboard: a selection again; not for Esc (it closes, user 2026-10-29: given back first it showed Cancel taken), Tab, Q, E */
  if(code==56&&in_menu())return;   /* Shift in a menu: nothing (only Esc goes back) */
  if(code==53){if(!repeat)escAs=esc_is_plus(!runtime_game_world_live||runtime_game_world_live(),(runtime_title_cursor&&runtime_title_cursor()>=0)||(titleMode&&!titleFree),pause_menu_open())?53:56;runtime_input_key(escAs,1);return;}
@@ -284,6 +286,8 @@ static int title_select(int item){
  if(item<0||item>=n)return 0;runtime_ui_select(h[item].id);return 1;}
 static uint64_t freeTick;   /* title_tick: the last tick with no menu (FREE) */
 static void title_tick(void){   /* main thread, every 8 ms */
+ {static NSPoint seen;NSPoint m=NSEvent.mouseLocation;if(m.x!=seen.x||m.y!=seen.y||(fakePointerOn&&titleFollow==2)){seen=m;keysLead=0;}
+  extern void runtime_ui_pointer_rules(int) __attribute__((weak));if(runtime_ui_pointer_rules)runtime_ui_pointer_rules(!keysLead);}   /* the mouse has the say unless a key took it */
  if(titleKey){runtime_input_key_synthetic(titleKey,0);titleKey=0;return;}   /* the press stays pending until the game reads it */
  int on=runtime_mouse_enabled()&&!settingsOpen;float fr[4];
 extern int runtime_input_dpad_held(void);   /* a quick-select bar (d-pad held) shows the same frame: not a pointer menu */
