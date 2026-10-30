@@ -2095,7 +2095,16 @@ static void key_icons_start(void) {
    (+0x48): in each element, every layout pane (a name at +0xb8) within 0x800 bytes, with its global place (+0x7c, +0x8c),
    size (+0x50) and flags (+0x58). */
 int runtime_ui_hits(MenuHit *out, int max, int *selected);
+enum { UI_CURSORS = 8 };
+static struct { _Atomic uint64_t obj, first, last; } g_cursors[UI_CURSORS];
+static _Atomic uint64_t g_menu_obj;
+static int ui_hits_of(uint64_t obj, MenuHit *out, int max, int *selected);
 void botw_uilist(void) {
+    { uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      for (int i = 0; i < UI_CURSORS; i++) if (atomic_load(&g_cursors[i].obj)) { MenuHit hh[32]; int ss;
+          fprintf(stderr, "[uilist] cursor %#llx first %.2fs ago last %.2fs ago hits %d%s\n", (unsigned long long)atomic_load(&g_cursors[i].obj),
+                  (now - atomic_load(&g_cursors[i].first)) / 1e9, (now - atomic_load(&g_cursors[i].last)) / 1e9, ui_hits_of(atomic_load(&g_cursors[i].obj), hh, 32, &ss),
+                  atomic_load(&g_cursors[i].obj) == atomic_load(&g_menu_obj) ? " (menu)" : ""); } }
     uint64_t obj = cursor_object(), sel = 0; uint64_t f[16];
     if (!obj) { fprintf(stderr, "[uilist] no cursor object\n"); return; }
     if (camdump_read(obj, f, sizeof f)) for (int i = 0; i < 16; i++) fprintf(stderr, "[uilist] obj+%02x %016llx\n", i * 8, (unsigned long long)f[i]);
@@ -2157,7 +2166,43 @@ void botw_uilist(void) {
    buttons are hidden by its root), and no empty inventory slot (its
    N_Born_00 hidden: flag 0x80). Returns how many, *selected the selected element's index (-1 if it has none); 0: no menu. */
 static uint64_t g_last_group;   /* ui_hits: the group the menu was last seen in (the selection's, or what the game wanted) */
+/* The menu cursors updating now (ui_nav_hook sees each one's per-frame step): a dialog over a screen (Save progress?)
+   has a cursor object of its own, opened after the screen's. The newest one with items on screen is the menu. */
+/* g_menu_obj: the cursor runtime_ui_hits last read (runtime_ui_select, ui_nav_hook) */
+static void cursor_seen(uint64_t obj) {
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW); int free = -1, old = 0;
+    for (int i = 0; i < UI_CURSORS; i++) {
+        if (atomic_load(&g_cursors[i].obj) == obj) {
+            if (now - atomic_load(&g_cursors[i].last) > 300000000ull) atomic_store(&g_cursors[i].first, now);   /* back after a while: newly opened */
+            atomic_store(&g_cursors[i].last, now); return;
+        }
+        if (free < 0 && now - atomic_load(&g_cursors[i].last) > 300000000ull) free = i;
+        if (atomic_load(&g_cursors[i].last) < atomic_load(&g_cursors[old].last)) old = i;
+    }
+    int i = free >= 0 ? free : old;
+    atomic_store(&g_cursors[i].obj, obj); atomic_store(&g_cursors[i].first, now); atomic_store(&g_cursors[i].last, now);
+}
 int runtime_ui_hits(MenuHit *out, int max, int *selected) {
+    uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW), tried[UI_CURSORS]; int nt = 0;
+    for (;;) {   /* newest first */
+        int best = -1;
+        for (int i = 0; i < UI_CURSORS; i++) {
+            uint64_t o = atomic_load(&g_cursors[i].obj); int done = 0;
+            for (int k = 0; k < nt; k++) done |= tried[k] == o;
+            if (!o || done || now - atomic_load(&g_cursors[i].last) > 150000000ull) continue;
+            if (best < 0 || atomic_load(&g_cursors[i].first) > atomic_load(&g_cursors[best].first)) best = i;
+        }
+        if (best < 0) break;
+        uint64_t o = atomic_load(&g_cursors[best].obj); tried[nt++] = o;
+        int n = ui_hits_of(o, out, max, selected);
+        if (n > 0) { atomic_store(&g_menu_obj, o); return n; }
+    }
+    uint64_t o = cursor_object(); *selected = -1;   /* none seen updating: the screen's own cursor (the title's idles), */
+    int n = o ? ui_hits_of(o, out, max, selected) : 0;
+    if (n > 0) atomic_store(&g_menu_obj, o);
+    return n;
+}
+static int ui_hits_of(uint64_t obj, MenuHit *out, int max, int *selected) {
     *selected = -1;
     /* The groups the d-pad step looks through (main+0x134e654..0x134e924): the cursor's group set (+0x20, +0x80, +0x28):
        count +0x28, groups +0x30, first-past-active +0x38, a signed byte per group +0x40 (negative: left out); from
@@ -2166,7 +2211,7 @@ int runtime_ui_hits(MenuHit *out, int max, int *selected) {
        group of its own and the page behind it stays active (2026-10-29: the pointer off the popup took an item behind
        it), so only the group of the selected element counts: +0x48, or the one the frame is on (+0x58; a long list
        reuses its rows and +0x48 can be left behind). */
-    uint64_t obj = cursor_object(), a20 = 0, a80 = 0, gm = 0, groups = 0, flagsp = 0, sel = 0; int32_t count = 0, end = 0;
+    uint64_t a20 = 0, a80 = 0, gm = 0, groups = 0, flagsp = 0, sel = 0; int32_t count = 0, end = 0;
     if (!obj || !camdump_read(obj + 0x48, &sel, 8) || !camdump_read(obj + 0x20, &a20, 8) || !camdump_read(a20 + 0x80, &a80, 8) || !camdump_read(a80 + 0x28, &gm, 8) ||
         !camdump_read(gm + 0x28, &count, 4) || !camdump_read(gm + 0x30, &groups, 8) || !camdump_read(gm + 0x38, &end, 4) ||
         !camdump_read(gm + 0x40, &flagsp, 8) || count <= 0 || count > 128) return 0;
@@ -2258,7 +2303,7 @@ static int g_letgo;                     /* the update's thread, between the two 
 static _Atomic int g_mouse_rules;       /* the mouse has the say */
 static _Atomic uint64_t g_asked;        /* what it wants selected, 0 for nothing */
 void runtime_ui_select(uint64_t element) {   /* frontend.m: the element under the pointer, 0 for none */
-    uint64_t obj = cursor_object(); atomic_store(&g_asked, element);
+    uint64_t obj = atomic_load(&g_menu_obj); atomic_store(&g_asked, element);
     if (obj && element) *(volatile uint64_t *)(uintptr_t)(obj + 0x50) = element;
 }
 void runtime_ui_mouse_rules(int on) { atomic_store(&g_mouse_rules, on); }
@@ -2270,7 +2315,8 @@ static int ui_nav_hook(ucontext_t *u) {
         return 1;
     }
     camdump_read(x[19] + 0x48, &sel, 8);
-    if (atomic_load(&g_mouse_rules) && runtime_mouse_enabled() && x[19] == cursor_object()) {
+    if (pc == UI_UPDATE_SITE) cursor_seen(x[19]);
+    if (atomic_load(&g_mouse_rules) && runtime_mouse_enabled() && x[19] == atomic_load(&g_menu_obj)) {
         uint64_t want = atomic_load(&g_asked); camdump_read(x[19] + 0x50, &pend, 8);
         if (pend && pend != want) { camdump_read(pend + 0x20, &g_last_group, 8); *(volatile uint64_t *)(uintptr_t)(x[19] + 0x50) = 0; pend = 0; }
         if (sel && sel != want && !pend) {   /* not the pointer's: let go, the game's way (its highlight goes too) */
