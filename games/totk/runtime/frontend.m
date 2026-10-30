@@ -144,6 +144,7 @@ static unsigned escAs,enterAs,eAs,spaceAs,vAs;
    mouseHeld the mouse turns the camera (the world playing, no menu): the pointer hidden where it is, never moved;
    keysLead a key walked the menu: the game's own selection until the mouse moves again. */
 static int uiMenu,keysLead;
+static int mapOpen;   /* 1 Tab (-) pressed in the world, 2 the world stopped since: the map, where Esc is B (user 2026-10-30: Esc always goes back) */
 extern int runtime_ui_hits(MenuHit *,int,int *) __attribute__((weak));extern void runtime_ui_select(uint64_t) __attribute__((weak));
 extern void runtime_ui_mouse_rules(int) __attribute__((weak));   /* game_patches_botw.c */
 static int in_menu(void){return runtime_game_world_live&&!runtime_game_world_live();}
@@ -158,7 +159,8 @@ static void front_key_down(unsigned short code,int repeat){
  if(code==56&&(repeat?horseShift:riding())){if(!repeat)horseShift=38;runtime_input_key(38,1);return;}
  if(code!=53&&code!=48&&code!=12&&code!=14&&code!=36&&code!=49&&!(code>=18&&code<=29))keysLead=1;   /* a key that walks the menu (not Esc, Tab, Q, E, Enter, Space, digits) */
  if(code==56&&in_menu())return;   /* Shift in a menu: nothing (only Esc goes back) */
- if(code==53){if(!repeat)escAs=esc_is_plus(world_on(),0,uiMenu)?53:56;runtime_input_key(escAs,1);return;}   /* a menu: back; else + */
+ if(code==48&&!repeat&&world_on())mapOpen=1;
+ if(code==53){if(!repeat)escAs=esc_is_plus(world_on(),0,uiMenu)&&mapOpen!=2?53:56;runtime_input_key(escAs,1);return;}   /* a menu: back; else + */
  if(code==14){if(!repeat)eAs=pause_tabs_open()?59:in_menu()?KEY_NONE:14;runtime_input_key(eAs,1);return;}   /* E in the pause menu: the next tab (R, Control), as Q (L) the one before; A in the world */
  if(code==9){if(!repeat)vAs=pause_tabs_open()?32:9;runtime_input_key(vAs,1);return;}   /* V in the inventory: sort (Y, U; the left click is A there); the d-pad's down elsewhere */
  if(code==49){if(!repeat){spaceAs=space_key();fprintf(stderr,"[totk-input] Space: %s\n",spaceAs==KEY_SKIP?"A and X (cutscene, dialog)":spaceAs==38?"A (menu)":"X (world)");}if(spaceAs==KEY_SKIP){runtime_input_key(38,1);runtime_input_key(34,1);}else runtime_input_key(spaceAs,1);return;}   /* space_skip.h */
@@ -287,6 +289,7 @@ static void title_tick(void){   /* main thread, every 8 ms: the three answers, n
  extern int runtime_input_dpad_held(void);int menu=uiN>0&&!runtime_input_dpad_held();   /* the quick-select bar is no menu (the camera's) */
  if(menu!=uiMenu){uiMenu=menu;fprintf(stderr,"[totk] menu pointer: %s\n",menu?"a menu":"no menu");
   [window invalidateCursorRectsForView:window.contentView];if(menu){[menu_cursor() set];window.acceptsMouseMovedEvents=YES;}}
+ if(mapOpen==1&&!world_on())mapOpen=2;else if(mapOpen==2&&world_on())mapOpen=0;
  front_mouse_update();
  if(on&&window.isKeyWindow)set_cursor_hidden(mouseHeld||(!menu&&NSPointInRect(NSEvent.mouseLocation,[window convertRectToScreen:window.contentView.frame])));   /* shown only on a menu; off the game's window it is the Mac's */
  if(runtime_ui_mouse_rules)runtime_ui_mouse_rules(on&&!keysLead);

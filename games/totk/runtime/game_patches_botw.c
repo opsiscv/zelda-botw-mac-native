@@ -993,6 +993,10 @@ void runtime_list_scroll(int steps) {   /* frontend.m: the wheel's notches */
         !camdump_read(sc + 0x364, &hi, 4) || !camdump_read(owner + 0x2c4, &at, 4) || !camdump_read(owner + 0x2d4, &target, 4)) return;
     float base = at - pos, row = roundf((target - base) / 70.0f) + (float)steps;
     *(volatile float *)(uintptr_t)(owner + 0x2d4) = base + fminf(fmaxf(row * 70.0f, lo), hi);
+    int top = (int)(fminf(fmaxf(row * 70.0f, lo), hi) / 70.0f), idx;   /* the keys' row kept among the 5 shown: above them the game's highlight stops half faded */
+    if (camdump_read(owner + 0x30c, &idx, 4) && (idx < top || idx > top + 4)) {
+        idx = idx < top ? top : top + 4; *(volatile int32_t *)(uintptr_t)(owner + 0x30c) = idx; *(volatile int32_t *)(uintptr_t)(owner + 0x310) = idx;
+    }
     if (getenv("TOTK_DEBUG_LOG")) fprintf(stderr, "[botw] list scroll %d: scroller %#llx owner %#llx at %g target %g -> %g\n", steps, (unsigned long long)sc, (unsigned long long)owner, pos, target, base + fminf(fmaxf(row * 70.0f, lo), hi));
 }
 static int list_scroll_hook(ucontext_t *u) {
