@@ -151,23 +151,26 @@ static int in_menu(void){return runtime_game_world_live&&!runtime_game_world_liv
 enum{KEY_NONE=255,KEY_SKIP=254,KEY_BACK=253};   /* runtime_input_key ignores them; KEY_SKIP: J (A) and I (X) together; KEY_BACK: Shift (B) and Esc (+) */
 static void key_pair(unsigned k,int down){if(k==KEY_SKIP){runtime_input_key(38,down);runtime_input_key(34,down);}else if(k==KEY_BACK){runtime_input_key(56,down);runtime_input_key(53,down);}else runtime_input_key(k,down);}
 static int world_on(void){return !runtime_game_world_live||runtime_game_world_live();}
-static unsigned space_key(void){int r=space_role(world_on(),0,uiMenu);return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
+extern int runtime_swimming(void) __attribute__((weak));static int swimming(void){return runtime_swimming&&runtime_swimming();}   /* swimming (user 2026-10-31): Shift dashes (X), Space nothing */
+extern int runtime_gliding(void) __attribute__((weak));   /* gliding: Space puts the paraglider away (B), as it opened it */
+static unsigned space_key(void){if(swimming())return KEY_NONE;if(runtime_gliding&&runtime_gliding())return 56;int r=space_role(world_on(),0,uiMenu);return r==SPACE_SKIP?KEY_SKIP:r==SPACE_CONFIRM?38:49;}
 /* A window key after the settings panel: what it presses depends on where the game is (above). */
-static unsigned horseE,horseShift;   /* on horseback (user 2026-10-29): Shift spurs (A), E gets off (B); kept per press */
+static unsigned horseE,horseShift,swimShift;   /* on horseback (user 2026-10-29): Shift spurs (A), E gets off (B); kept per press */
 static int riding(void){extern int runtime_horse_state(float *,float *) __attribute__((weak));float y,v;return runtime_horse_state&&runtime_horse_state(&y,&v);}
 static void front_key_down(unsigned short code,int repeat){
  if(code==14&&(repeat?horseE:riding())){if(!repeat)horseE=56;runtime_input_key(56,1);return;}
  if(code==56&&(repeat?horseShift:riding())){if(!repeat)horseShift=38;runtime_input_key(38,1);return;}
+ if(code==56&&(repeat?swimShift:swimming())){if(!repeat)swimShift=34;runtime_input_key(34,1);return;}
  if(code!=53&&code!=48&&code!=12&&code!=14&&code!=36&&code!=49&&!(code>=18&&code<=29))keysLead=1;   /* a key that walks the menu (not Esc, Tab, Q, E, Enter, Space, digits) */
  if(code==56&&in_menu())return;   /* Shift in a menu: nothing (only Esc goes back) */
  if(code==48&&!repeat&&world_on())mapOpen=1;
  if(code==53){if(!repeat)escAs=!esc_is_plus(world_on(),0,uiMenu)||mapOpen==2?56:world_on()?53:KEY_BACK;key_pair(escAs,1);return;}   /* a menu: back; the world: +; a dialog, a cutscene: B (hurries, goes on, the choices' cancel) and + (Skip +) */
  if(code==14){if(!repeat)eAs=pause_tabs_open()?59:in_menu()?KEY_NONE:14;runtime_input_key(eAs,1);return;}   /* E in the pause menu: the next tab (R, Control), as Q (L) the one before; A in the world */
  if(code==9){if(!repeat)vAs=pause_tabs_open()?32:9;runtime_input_key(vAs,1);return;}   /* V in the inventory: sort (Y, U; the left click is A there); the d-pad's down elsewhere */
- if(code==49){if(!repeat){spaceAs=space_key();fprintf(stderr,"[totk-input] Space: %s\n",spaceAs==KEY_SKIP?"A and X (cutscene, dialog)":spaceAs==38?"A (menu)":"X (world)");}key_pair(spaceAs,1);return;}   /* space_skip.h */
+ if(code==49){if(!repeat){spaceAs=space_key();fprintf(stderr,"[totk-input] Space: %s\n",spaceAs==KEY_NONE?"nothing (swimming)":spaceAs==56?"B (gliding)":spaceAs==KEY_SKIP?"A and X (cutscene, dialog)":spaceAs==38?"A (menu)":"X (world)");}key_pair(spaceAs,1);return;}   /* space_skip.h */
  if(code==36){if(!repeat)enterAs=runtime_game_world_live&&!runtime_game_world_live()?38:36;runtime_input_key(enterAs,1);return;}   /* Enter in a menu: A */
  runtime_input_key(code,1);}
-static void front_key_up(unsigned short code){if(code==14&&horseE){runtime_input_key(horseE,0);horseE=0;return;}if(code==56&&horseShift){runtime_input_key(horseShift,0);horseShift=0;return;}if(code==53&&escAs){key_pair(escAs,0);escAs=0;return;}if(code==36&&enterAs){runtime_input_key(enterAs,0);enterAs=0;return;}if(code==14&&eAs){runtime_input_key(eAs,0);eAs=0;return;}if(code==9&&vAs){runtime_input_key(vAs,0);vAs=0;return;}if(code==49&&spaceAs){key_pair(spaceAs,0);spaceAs=0;return;}runtime_input_key(code,0);}
+static void front_key_up(unsigned short code){if(code==14&&horseE){runtime_input_key(horseE,0);horseE=0;return;}if(code==56&&horseShift){runtime_input_key(horseShift,0);horseShift=0;return;}if(code==56&&swimShift){runtime_input_key(swimShift,0);swimShift=0;return;}if(code==53&&escAs){key_pair(escAs,0);escAs=0;return;}if(code==36&&enterAs){runtime_input_key(enterAs,0);enterAs=0;return;}if(code==14&&eAs){runtime_input_key(eAs,0);eAs=0;return;}if(code==9&&vAs){runtime_input_key(vAs,0);vAs=0;return;}if(code==49&&spaceAs){key_pair(spaceAs,0);spaceAs=0;return;}runtime_input_key(code,0);}
 /* keys.txt next to controls.txt (TOTK_CONTROLS; key_map.h): read at the first key. A bad line is logged and the
    default kept. */
 static unsigned key_remap(unsigned code){static uint8_t map[KEY_MAP_SIZE];static int loaded;

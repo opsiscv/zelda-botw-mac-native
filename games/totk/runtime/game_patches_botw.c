@@ -34,6 +34,14 @@ enum { QUEST_SITE = 0x11b9b3c, QUEST_WORD = 0xf95dce68 };
 enum { SCROLL_SITE = 0x10886fc, SCROLL_WORD = 0xbd038661 };
 enum { SLIDE_SITE = 0x10860c4, SLIDE_WORD = 0x2d458e60 };
 static uint8_t *g_slide_main;
+/* Link swimming or gliding: the per-frame steps (calc_) of the actions PlayerSwimWait, PlayerSwimMove, PlayerSwimDash and
+   the paraglider's (zeldaret/botw; found here by their static params EnergyWait, MaxSpeedDash, EnergyDash, EnergyGlide),
+   each starting sub sp, sp, #0x20; the last one is the glide */
+static const uint32_t swim_sites[] = { 0xecc970, 0xeca960, 0xec9370, 0xea3e40 }; enum { SWIM_WORD = 0xd10083ffu, GLIDE_SITE = 3 };
+static uint8_t *g_swim_main; static _Atomic uint64_t g_swim_ns, g_glide_ns;
+static int recent(uint64_t t) { return t && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t < 150000000ull; }
+int runtime_swimming(void) { return recent(atomic_load(&g_swim_ns)); }
+int runtime_gliding(void) { return recent(atomic_load(&g_glide_ns)); }
 static uint8_t *g_scroll_main;   /* a list's scroll step (main+0x10885e0): str s1, [x19, #0x384], its position */   /* the pause menu's Adventure Log step (runs while it is open), at ldr x8, [x19, #0x3b98] */
 static _Atomic uint64_t g_quest_ns;
 static _Atomic int g_quest_tab;
@@ -665,6 +673,9 @@ void runtime_game_patches(Module *m) {
     { uint32_t w; memcpy(&w, m->base + SLIDE_SITE, 4);
       if (w == SLIDE_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d3u << 5); memcpy(m->base + SLIDE_SITE, &b, 4); g_slide_main = m->base; }
       fprintf(stderr, "[botw] slide list: %s\n", g_slide_main ? "hooked" : "not hooked"); }
+    { int ok = !ios_code(); for (size_t i = 0; i < sizeof swim_sites / sizeof *swim_sites; i++) { uint32_t w; memcpy(&w, m->base + swim_sites[i], 4); ok &= w == SWIM_WORD; }
+      if (ok) { for (size_t i = 0; i < sizeof swim_sites / sizeof *swim_sites; i++) { uint32_t b = 0xd4200000u | (0x7d3u << 5); memcpy(m->base + swim_sites[i], &b, 4); } g_swim_main = m->base; }
+      fprintf(stderr, "[botw] swimming, gliding: %s\n", g_swim_main ? "hooked" : "not hooked"); }
     { uint32_t w; memcpy(&w, m->base + INV_PAGE_SITE, 4);
       if (w == INV_PAGE_WORD && !ios_code()) { uint32_t b = 0xd4200000u | (0x7d4u << 5); memcpy(m->base + INV_PAGE_SITE, &b, 4); g_inv_main = m->base; }
       fprintf(stderr, "[botw] inventory pages: %s\n", g_inv_main ? "hooked" : "not hooked"); }
@@ -755,6 +766,16 @@ static int chase_hook(ucontext_t *u, int site) {
        tilt +0x174 are overwritten): nothing to write, the mouse steers it through the stick (runtime_mouse_stick_camera) */
     if (site == 4) { atomic_store(&g_stick_cam_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW)); u->uc_mcontext->__ss.__pc += 4; return 1; }
     int moved = runtime_mouse_camera_take && runtime_mouse_camera_take(&right, &down);
+    if (site == 13) {   /* CameraTail (climbing a wall) works its position out from its own angles, degrees: heading +0x198, tilt +0x18c
+                           (2026-10-31, read while the stick turned it); a turn of its position is undone, the mouse turns them. The game
+                           pulls them back behind Link as he climbs: held where the mouse put them until it rests 1.5 s (user: no fight) */
+        static float look[2]; static uint64_t mouse_ns; uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        float *h = (float *)(uintptr_t)(self + 0x198), *t = (float *)(uintptr_t)(self + 0x18c);
+        if (moved) { if (now - mouse_ns > 1500000000ull) { look[0] = *h; look[1] = *t; }
+                     look[0] = (float)remainder(look[0] - right * 180 / M_PI, 360); look[1] = fmaxf(-70, fminf(70, look[1] + (float)(down * 180 / M_PI))); mouse_ns = now; }
+        if (now - mouse_ns <= 1500000000ull) { *h = look[0]; *t = look[1]; }
+        u->uc_mcontext->__ss.__pc += 4; return 1;
+    }
     if (site == 7 && runtime_mouse_enabled() && camdump_read(self + 0x28, &p, 8) && p && camdump_read(p + 8, &act, 8) && act) {
         /* CameraHorse in mouse mode: the camera looks where the mouse put it (g_horse_look, the view's heading in degrees,
            taken from the camera when riding starts) and nowhere else: its heading (+0x140 / +0x188, degrees, the opposite
@@ -824,7 +845,7 @@ static int chase_hook(ucontext_t *u, int site) {
    sub sp / stp ... [sp, #-n]! / str ... [sp, #-n]!, emulated) counts its calls; "probes" prints the counts and zeroes them. */
 enum { PROBES_MAX = 128 };
 static uint8_t *g_probe_main; static uint32_t g_probe_off[PROBES_MAX], g_probe_word[PROBES_MAX]; static _Atomic uint32_t g_probe_calls[PROBES_MAX]; static uint64_t g_probe_lr[PROBES_MAX][4]; static int g_probe_n;
-static int probe_prologue(uint32_t w) { return (w & 0xffc003ff) == 0xd10003ff || (w & 0xffc003e0) == 0xa98003e0 || (w & 0xffe00fe0) == 0xf8000fe0; }
+static int probe_prologue(uint32_t w) { return (w & 0xffc003ff) == 0xd10003ff || (w & 0xffc003e0) == 0xa98003e0 || (w & 0xffc003e0) == 0x6d8003e0 || (w & 0xffe00fe0) == 0xf8000fe0; }   /* stp x or d */
 static void probes_arm(Module *m) {
     const char *e = getenv("TOTK_PROBE"); if (!e || !*e || ios_code()) return;
     for (const char *p = e; *p && g_probe_n < PROBES_MAX; ) {
@@ -845,8 +866,9 @@ static int probe_hook(ucontext_t *u, int i) {
     uint32_t w = g_probe_word[i]; uint64_t *x = u->uc_mcontext->__ss.__x; uint64_t sp = u->uc_mcontext->__ss.__sp;
     #define PROBE_REG(r) ((r) == 31 ? 0 : (r) == 29 ? u->uc_mcontext->__ss.__fp : (r) == 30 ? u->uc_mcontext->__ss.__lr : x[(r)])
     if ((w & 0xffc003ff) == 0xd10003ff) { uint64_t imm = (w >> 10) & 0xfff; if ((w >> 22) & 1) imm <<= 12; sp -= imm; }
-    else if ((w & 0xffc003e0) == 0xa98003e0) { int64_t imm = (int64_t)((int32_t)(((w >> 15) & 0x7f) << 25) >> 25) * 8; sp += imm;
-        *(uint64_t *)(uintptr_t)sp = PROBE_REG(w & 31); *(uint64_t *)(uintptr_t)(sp + 8) = PROBE_REG((w >> 10) & 31); }
+    else if ((w & 0xffc003e0) == 0xa98003e0 || (w & 0xffc003e0) == 0x6d8003e0) { int64_t imm = (int64_t)((int32_t)(((w >> 15) & 0x7f) << 25) >> 25) * 8; sp += imm; int d = w >> 26 & 1;
+        *(uint64_t *)(uintptr_t)sp = d ? (uint64_t)u->uc_mcontext->__ns.__v[w & 31] : PROBE_REG(w & 31);
+        *(uint64_t *)(uintptr_t)(sp + 8) = d ? (uint64_t)u->uc_mcontext->__ns.__v[(w >> 10) & 31] : PROBE_REG((w >> 10) & 31); }
     else { int64_t imm = (int32_t)(((w >> 12) & 0x1ff) << 23) >> 23; sp += imm; *(uint64_t *)(uintptr_t)sp = PROBE_REG(w & 31); }
     #undef PROBE_REG
     { uint64_t lr = u->uc_mcontext->__ss.__lr; for (int k = 0; k < 4; k++) { if (g_probe_lr[i][k] == lr) break; if (!g_probe_lr[i][k]) { g_probe_lr[i][k] = lr; break; } } }
@@ -1042,6 +1064,10 @@ int botw_jq_hook(void *context) {   /* SIGTRAP from loader.c crash(): 1 = it was
     if (g_horse_ret_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_horse_ret_main + HORSE_CAM_RET) return horse_ret_hook(context);
     if (g_scroll_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_scroll_main + SCROLL_SITE) return list_scroll_hook(context);
     if (g_slide_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_slide_main + SLIDE_SITE) return slide_hook(context);
+    if (g_swim_main) for (size_t i = 0; i < sizeof swim_sites / sizeof *swim_sites; i++)
+        if (((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_swim_main + swim_sites[i]) {   /* sub sp, sp, #0x20, emulated */
+            ((ucontext_t *)context)->uc_mcontext->__ss.__sp -= 0x20; ((ucontext_t *)context)->uc_mcontext->__ss.__pc += 4;
+            atomic_store(i == GLIDE_SITE ? &g_glide_ns : &g_swim_ns, clock_gettime_nsec_np(CLOCK_UPTIME_RAW)); return 1; }
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + INV_PAGE_SITE) return inv_page_hook(context);
     if (g_inv_main && ((ucontext_t *)context)->uc_mcontext->__ss.__pc == (uintptr_t)g_inv_main + QUEST_SITE) {
         ucontext_t *u = context; uint64_t *x = u->uc_mcontext->__ss.__x, list = 0; camdump_read(x[19] + 0x3b98, &list, 8); x[8] = list;
